@@ -1,0 +1,21 @@
+# Runtime data
+logs/
+recordings/
+state/
+transcripts/
+
+# Built macOS artifacts
+*.app/
+bin/codex-voice-recording-indicator
+
+# Python / Conda local state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# macOS metadata
+.DS_Store

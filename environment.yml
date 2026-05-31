@@ -1,0 +1,16 @@
+name: codex-voice
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - ffmpeg
+  - portaudio
+  - numpy>=1.26
+  - requests>=2.32
+  - pip:
+      - mlx-whisper>=0.4.2
+      - faster-whisper>=1.1.1
+      - sounddevice>=0.5.1
+      - pyperclip>=1.9
+      - opencc-python-reimplemented>=0.1.7
