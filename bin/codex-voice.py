@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -56,6 +57,9 @@ RUNTIME_PATHS = (
     "/usr/sbin",
     "/sbin",
 )
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_CHAT_URL = f"{DEFAULT_OLLAMA_BASE_URL}/api/chat"
+DEFAULT_OLLAMA_NUM_CTX = 4000
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -105,7 +109,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ollama_model_prepare_timeout_seconds": 180,
     "ollama_temperature": 0,
     "ollama_num_predict": 256,
-    "ollama_num_ctx": 4096,
+    "ollama_num_ctx": DEFAULT_OLLAMA_NUM_CTX,
     "ollama_think": False,
     "ollama_keep_alive": -1,
     "ollama_clean_context_per_request": True,
@@ -903,15 +907,148 @@ def transcribe_with_faster_whisper(
     return "".join(segment.text for segment in segments).strip()
 
 
-def ollama_base_url(config: dict[str, Any]) -> str:
-    configured = str(config.get("ollama_base_url") or "").strip()
-    if configured:
-        return configured.rstrip("/")
-
-    parsed = urlparse(str(config.get("ollama_url", "http://127.0.0.1:11434/api/chat")))
+def normalize_ollama_host(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value}"
+    parsed = urlparse(value)
     if parsed.scheme and parsed.netloc:
         return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
-    return "http://127.0.0.1:11434"
+    return ""
+
+
+def base_url_from_chat_url(value: str) -> str:
+    parsed = urlparse(value.strip())
+    if parsed.scheme and parsed.netloc:
+        return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+    return ""
+
+
+def launchctl_getenv(name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["/bin/launchctl", "getenv", name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def configured_ollama_base_url(config: dict[str, Any]) -> str:
+    configured = normalize_ollama_host(str(config.get("ollama_base_url") or ""))
+    if configured and configured != DEFAULT_OLLAMA_BASE_URL:
+        return configured
+
+    configured_chat = base_url_from_chat_url(str(config.get("ollama_url") or ""))
+    if configured_chat and configured_chat != DEFAULT_OLLAMA_BASE_URL:
+        return configured_chat
+    return ""
+
+
+def ollama_base_url(config: dict[str, Any]) -> str:
+    configured = configured_ollama_base_url(config)
+    if configured:
+        return configured
+
+    host = normalize_ollama_host(os.environ.get("OLLAMA_HOST", ""))
+    if host:
+        return host
+
+    host = normalize_ollama_host(launchctl_getenv("OLLAMA_HOST"))
+    if host:
+        return host
+
+    return DEFAULT_OLLAMA_BASE_URL
+
+
+def ollama_chat_url(config: dict[str, Any]) -> str:
+    configured = str(config.get("ollama_url") or "").strip()
+    configured_base = base_url_from_chat_url(configured)
+    if configured and configured_base and configured_base != DEFAULT_OLLAMA_BASE_URL:
+        return configured
+    return f"{ollama_base_url(config)}/api/chat"
+
+
+def ollama_env(config: dict[str, Any]) -> dict[str, str]:
+    environment = os.environ.copy()
+    parsed = urlparse(ollama_base_url(config))
+    if parsed.netloc:
+        environment["OLLAMA_HOST"] = parsed.netloc
+    return environment
+
+
+def ollama_num_ctx(config: dict[str, Any]) -> int:
+    try:
+        return int(config.get("ollama_num_ctx", DEFAULT_OLLAMA_NUM_CTX))
+    except (TypeError, ValueError):
+        return DEFAULT_OLLAMA_NUM_CTX
+
+
+def start_ollama(config: dict[str, Any], logger: logging.Logger) -> None:
+    ollama_path = shutil.which("ollama")
+    if not ollama_path:
+        logger.warning("Ollama CLI is not installed; cannot start service.")
+        return
+
+    environment = ollama_env(config)
+    for command in ([ollama_path, "launch"], ["/usr/bin/open", "-ga", "Ollama"]):
+        if not Path(command[0]).exists():
+            continue
+        try:
+            subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=environment,
+                timeout=3,
+            )
+        except Exception as exc:
+            logger.debug("Could not run %s: %s", command, exc)
+
+    try:
+        subprocess.Popen(
+            [ollama_path, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        logger.debug("Could not start ollama serve: %s", exc)
+
+
+def ensure_ollama_service(
+    config: dict[str, Any],
+    logger: logging.Logger,
+    requests_module: Any,
+) -> None:
+    url = f"{ollama_base_url(config)}/api/tags"
+    try:
+        requests_module.get(url, timeout=2).raise_for_status()
+        return
+    except Exception as exc:
+        logger.info("Ollama API is not ready at %s: %s", url, exc)
+
+    start_ollama(config, logger)
+    deadline = time.monotonic() + float(config.get("ollama_start_timeout_seconds", 12))
+    last_error = ""
+    while time.monotonic() <= deadline:
+        try:
+            requests_module.get(url, timeout=2).raise_for_status()
+            return
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(0.4)
+    logger.warning("Ollama API did not become ready at %s: %s", url, last_error)
 
 
 def transcribe_with_ollama(
@@ -927,6 +1064,7 @@ def transcribe_with_ollama(
     if not model:
         raise CodexVoiceError("No Ollama transcription model is configured.")
 
+    ensure_ollama_service(config, logging.getLogger("codex-voice"), requests)
     url = f"{ollama_base_url(config)}/v1/audio/transcriptions"
     timeout = float(config.get("ollama_transcription_timeout_seconds", 120))
     language = str(config.get("whisper_language", "zh"))
@@ -1222,8 +1360,9 @@ def correct_with_ollama(
     models.extend(str(item) for item in config.get("ollama_fallback_models", []) if item)
     models = [model for index, model in enumerate(models) if model and model not in models[:index]]
 
+    ensure_ollama_service(config, logger, requests)
     timeout = float(config.get("ollama_timeout_seconds", 25))
-    url = str(config.get("ollama_url", "http://127.0.0.1:11434/api/chat"))
+    url = ollama_chat_url(config)
     last_error = ""
 
     for model in models:
@@ -1245,7 +1384,7 @@ def correct_with_ollama(
         }
         num_ctx = config.get("ollama_num_ctx")
         if num_ctx:
-            payload["options"]["num_ctx"] = int(num_ctx)
+            payload["options"]["num_ctx"] = ollama_num_ctx(config)
         try:
             logger.info("Correcting text with Ollama model: %s", model)
             response = requests.post(url, json=payload, timeout=timeout)

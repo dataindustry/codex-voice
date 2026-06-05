@@ -135,7 +135,7 @@ cat >"$AGENT_PLIST" <<PLIST
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <false/>
   <key>LimitLoadToSessionType</key>
   <string>Aqua</string>
   <key>WorkingDirectory</key>

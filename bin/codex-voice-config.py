@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -23,6 +25,9 @@ STATE_DIR = ROOT / "state"
 MODEL_TASK_PATH = STATE_DIR / "model-task.json"
 DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 DEFAULT_FASTER_WHISPER_MODEL = "large-v3-turbo"
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_CHAT_URL = f"{DEFAULT_OLLAMA_BASE_URL}/api/chat"
+DEFAULT_OLLAMA_NUM_CTX = 4000
 
 
 def load_config() -> dict[str, Any]:
@@ -176,6 +181,10 @@ def parse_args() -> argparse.Namespace:
         help="Unload the currently selected correction model from memory when supported.",
     )
     parser.add_argument(
+        "--unload-ollama-model",
+        help="Unload the named Ollama model from memory.",
+    )
+    parser.add_argument(
         "--model-task-status",
         action="store_true",
         help="Show the current model preparation task state as JSON.",
@@ -228,15 +237,171 @@ def correction_profile(config: dict[str, Any]) -> str:
     return backend or "rule-only"
 
 
-def ollama_base_url(config: dict[str, Any]) -> str:
-    configured = str(config.get("ollama_base_url") or "").strip()
-    if configured:
-        return configured.rstrip("/")
-
-    parsed = urlparse(str(config.get("ollama_url", "http://127.0.0.1:11434/api/chat")))
+def normalize_ollama_host(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value}"
+    parsed = urlparse(value)
     if parsed.scheme and parsed.netloc:
         return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
-    return "http://127.0.0.1:11434"
+    return ""
+
+
+def base_url_from_chat_url(value: str) -> str:
+    parsed = urlparse(value.strip())
+    if parsed.scheme and parsed.netloc:
+        return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+    return ""
+
+
+def launchctl_getenv(name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["/bin/launchctl", "getenv", name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def configured_ollama_base_url(config: dict[str, Any]) -> str:
+    configured = normalize_ollama_host(str(config.get("ollama_base_url") or ""))
+    if configured and configured != DEFAULT_OLLAMA_BASE_URL:
+        return configured
+
+    configured_chat = base_url_from_chat_url(str(config.get("ollama_url") or ""))
+    if configured_chat and configured_chat != DEFAULT_OLLAMA_BASE_URL:
+        return configured_chat
+    return ""
+
+
+def ollama_base_url(config: dict[str, Any]) -> str:
+    configured = configured_ollama_base_url(config)
+    if configured:
+        return configured
+
+    host = normalize_ollama_host(os.environ.get("OLLAMA_HOST", ""))
+    if host:
+        return host
+
+    host = normalize_ollama_host(launchctl_getenv("OLLAMA_HOST"))
+    if host:
+        return host
+
+    return DEFAULT_OLLAMA_BASE_URL
+
+
+def ollama_chat_url(config: dict[str, Any]) -> str:
+    configured = str(config.get("ollama_url") or "").strip()
+    configured_base = base_url_from_chat_url(configured)
+    if configured and configured_base and configured_base != DEFAULT_OLLAMA_BASE_URL:
+        return configured
+    return f"{ollama_base_url(config)}/api/chat"
+
+
+def ollama_env(config: dict[str, Any]) -> dict[str, str]:
+    environment = os.environ.copy()
+    parsed = urlparse(ollama_base_url(config))
+    if parsed.netloc:
+        environment["OLLAMA_HOST"] = parsed.netloc
+    return environment
+
+
+def ollama_num_ctx(config: dict[str, Any]) -> int:
+    try:
+        return int(config.get("ollama_num_ctx", DEFAULT_OLLAMA_NUM_CTX))
+    except (TypeError, ValueError):
+        return DEFAULT_OLLAMA_NUM_CTX
+
+
+def read_ollama_json(config: dict[str, Any], path: str, timeout: float = 3) -> dict[str, Any]:
+    with urllib.request.urlopen(f"{ollama_base_url(config)}{path}", timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def wait_for_ollama(config: dict[str, Any], timeout: float) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while time.monotonic() <= deadline:
+        try:
+            read_ollama_json(config, "/api/tags", timeout=2)
+            return True, ""
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(0.4)
+    return False, last_error
+
+
+def start_ollama(config: dict[str, Any]) -> tuple[bool, str]:
+    ollama_path = shutil.which("ollama")
+    if not ollama_path:
+        return False, "Ollama CLI is not installed."
+
+    environment = ollama_env(config)
+    launch_errors: list[str] = []
+    commands = [
+        [ollama_path, "launch"],
+        ["/usr/bin/open", "-ga", "Ollama"],
+    ]
+    for command in commands:
+        if not Path(command[0]).exists():
+            continue
+        try:
+            subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=environment,
+                timeout=3,
+            )
+        except Exception as exc:
+            launch_errors.append(str(exc))
+
+    try:
+        subprocess.Popen(
+            [ollama_path, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        launch_errors.append(str(exc))
+
+    if launch_errors:
+        return True, "; ".join(launch_errors)
+    return True, ""
+
+
+def ensure_ollama_service(config: dict[str, Any]) -> tuple[bool, str, str]:
+    ready, error = wait_for_ollama(config, timeout=0.1)
+    if ready:
+        return True, "available", ""
+
+    if not shutil.which("ollama"):
+        return False, "ollama_not_installed", "Ollama CLI is not installed."
+
+    started, start_error = start_ollama(config)
+    if not started:
+        return False, "ollama_not_installed", start_error
+
+    ready, error = wait_for_ollama(
+        config,
+        timeout=float(config.get("ollama_start_timeout_seconds", 12)),
+    )
+    if ready:
+        return True, "available", ""
+    detail = error or start_error or "Ollama API did not become ready."
+    return False, "service_unavailable", detail
 
 
 def ollama_post_json(
@@ -257,8 +422,7 @@ def ollama_post_json(
 
 
 def ollama_get_json(config: dict[str, Any], path: str) -> dict[str, Any]:
-    with urllib.request.urlopen(f"{ollama_base_url(config)}{path}", timeout=3) as response:
-        return json.loads(response.read().decode("utf-8"))
+    return read_ollama_json(config, path, timeout=3)
 
 
 def model_name(model: dict[str, Any]) -> str:
@@ -317,13 +481,43 @@ def classify_ollama_model(config: dict[str, Any], model: dict[str, Any]) -> dict
 
 
 def list_ollama_models(config: dict[str, Any]) -> None:
+    service_ready, status, service_error = ensure_ollama_service(config)
+    base_url = ollama_base_url(config)
+    configured_correction_model = str(config.get("ollama_model", "") or "")
+    if not service_ready:
+        payload = {
+            "available": False,
+            "status": status,
+            "error": service_error,
+            "base_url": base_url,
+            "models": [],
+            "transcription_models": [],
+            "correction_models": [],
+            "configured_correction_model": configured_correction_model,
+            "configured_correction_model_installed": False,
+            "configured_correction_model_loaded": False,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+
     try:
         tags = ollama_get_json(config, "/api/tags")
         models = tags.get("models", [])
         if not isinstance(models, list):
             models = []
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        print(json.dumps({"available": False, "error": str(exc), "models": []}, ensure_ascii=False))
+        print(json.dumps({
+            "available": False,
+            "status": "service_unavailable",
+            "error": str(exc),
+            "base_url": base_url,
+            "models": [],
+            "transcription_models": [],
+            "correction_models": [],
+            "configured_correction_model": configured_correction_model,
+            "configured_correction_model_installed": False,
+            "configured_correction_model_loaded": False,
+        }, ensure_ascii=False))
         return
 
     classified = [
@@ -331,14 +525,35 @@ def list_ollama_models(config: dict[str, Any]) -> None:
         for model in models
         if isinstance(model, dict) and model_name(model)
     ]
+    loaded_names: set[str] = set()
+    try:
+        running = ollama_get_json(config, "/api/ps")
+        running_models = running.get("models", [])
+        if isinstance(running_models, list):
+            loaded_names = {
+                model_name(item)
+                for item in running_models
+                if isinstance(item, dict) and model_name(item)
+            }
+    except Exception:
+        loaded_names = set()
+    for item in classified:
+        item["loaded"] = item["name"] in loaded_names
     transcription_models = [item for item in classified if item["transcription_candidate"]]
     correction_models = [item for item in classified if item["correction_candidate"]]
+    configured_installed = any(item["name"] == configured_correction_model for item in classified)
+    configured_loaded = configured_correction_model in loaded_names
     payload = {
         "available": True,
+        "status": "available",
         "error": "",
+        "base_url": base_url,
         "models": classified,
         "transcription_models": transcription_models,
         "correction_models": correction_models,
+        "configured_correction_model": configured_correction_model,
+        "configured_correction_model_installed": configured_installed,
+        "configured_correction_model_loaded": configured_loaded,
     }
     print(json.dumps(payload, ensure_ascii=False))
 
@@ -462,6 +677,9 @@ def prepare_current_transcription_model(config: dict[str, Any]) -> None:
         elif backend == "ollama":
             if not model:
                 raise RuntimeError("No Ollama transcription model is selected.")
+            service_ready, _status, service_error = ensure_ollama_service(config)
+            if not service_ready:
+                raise RuntimeError(f"Ollama service is not ready: {service_error}")
             write_model_task("running", "transcription", label, "正在调用 Ollama 音频转录接口预热", None)
             try:
                 import requests
@@ -499,6 +717,9 @@ def prepare_current_correction_model(config: dict[str, Any]) -> None:
         if backend == "ollama":
             if not model:
                 raise RuntimeError("No Ollama correction model is selected.")
+            service_ready, _status, service_error = ensure_ollama_service(config)
+            if not service_ready:
+                raise RuntimeError(f"Ollama service is not ready: {service_error}")
             write_model_task("running", "correction", label, "正在让 Ollama 加载模型到内存", None)
             payload = {
                 "model": model,
@@ -511,7 +732,7 @@ def prepare_current_correction_model(config: dict[str, Any]) -> None:
                 "options": {
                     "temperature": 0,
                     "num_predict": 1,
-                    "num_ctx": int(config.get("ollama_num_ctx", 4096)),
+                    "num_ctx": ollama_num_ctx(config),
                 },
             }
             ollama_post_json(
@@ -528,30 +749,41 @@ def prepare_current_correction_model(config: dict[str, Any]) -> None:
         raise
 
 
+def unload_ollama_model(config: dict[str, Any], model: str, scope: str = "correction") -> None:
+    model = model.strip()
+    label = f"卸载模型：{model}"
+    write_model_task("running", scope, label, "正在从内存卸载模型", None)
+    try:
+        if not model:
+            raise RuntimeError("Ollama model name cannot be empty.")
+        service_ready, _status, service_error = ensure_ollama_service(config)
+        if not service_ready:
+            raise RuntimeError(f"Ollama service is not ready: {service_error}")
+        ollama_post_json(
+            config,
+            "/api/generate",
+            {"model": model, "prompt": "", "stream": False, "keep_alive": 0},
+            timeout=30,
+        )
+        write_model_task("succeeded", scope, label, "模型已从内存卸载", 1.0)
+        return
+    except Exception as exc:
+        write_model_task("failed", scope, label, str(exc), None)
+        raise
+
+
 def unload_current_correction_model(config: dict[str, Any]) -> None:
     backend = str(config.get("correction_backend", "ollama"))
     model = str(config.get("ollama_model", "")) if backend == "ollama" else backend
-    label = f"卸载纠错模型：{model or backend}"
-    write_model_task("running", "correction", label, "正在从内存卸载模型", None)
-    try:
-        if backend in {"rule-only", "none"}:
-            write_model_task("succeeded", "correction", "规则纠错", "无需卸载模型", 1.0)
-            return
-        if backend == "ollama":
-            if not model:
-                raise RuntimeError("No Ollama correction model is selected.")
-            ollama_post_json(
-                config,
-                "/api/generate",
-                {"model": model, "prompt": "", "stream": False, "keep_alive": 0},
-                timeout=30,
-            )
-            write_model_task("succeeded", "correction", label, "模型已从内存卸载", 1.0)
-            return
-        raise RuntimeError(f"Unsupported correction backend: {backend}")
-    except Exception as exc:
-        write_model_task("failed", "correction", label, str(exc), None)
-        raise
+    if backend in {"rule-only", "none"}:
+        write_model_task("succeeded", "correction", "规则纠错", "无需卸载模型", 1.0)
+        return
+    if backend == "ollama":
+        if not model:
+            raise RuntimeError("No Ollama correction model is selected.")
+        unload_ollama_model(config, model, scope="correction")
+        return
+    raise RuntimeError(f"Unsupported correction backend: {backend}")
 
 
 def default_input_index(sd: Any) -> int | None:
@@ -737,6 +969,11 @@ def main() -> int:
     if args.unload_current_correction_model:
         unload_current_correction_model(config)
         print("Codex Voice correction model was unloaded from memory.")
+        return 0
+
+    if args.unload_ollama_model is not None:
+        unload_ollama_model(config, args.unload_ollama_model)
+        print(f"Codex Voice Ollama model was unloaded: {args.unload_ollama_model}")
         return 0
 
     show(config)

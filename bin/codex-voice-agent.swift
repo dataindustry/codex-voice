@@ -15,12 +15,20 @@ struct VoiceStatus {
 struct InputDevice {
     let name: String
     let isDefault: Bool
+    let channels: Int?
+    let index: Int?
 }
 
 struct OllamaModel {
     let name: String
     let capabilities: [String]
     let needsTest: Bool
+    let loaded: Bool
+    let size: Int64?
+    let family: String
+    let families: [String]
+    let parameterSize: String
+    let quantization: String
 }
 
 struct ModelTask {
@@ -34,7 +42,12 @@ struct ModelTask {
 
 struct OllamaScan {
     let available: Bool
+    let status: String
     let error: String
+    let baseURL: String
+    let configuredCorrectionModel: String
+    let configuredCorrectionModelInstalled: Bool
+    let configuredCorrectionModelLoaded: Bool
     let transcriptionModels: [OllamaModel]
     let correctionModels: [OllamaModel]
 }
@@ -43,6 +56,8 @@ struct PanelMaintenance {
     let pythonPath: String
     let launchAgentStatus: String
     let ollamaStatus: String
+    let ollamaStatusCode: String
+    let ollamaBaseURL: String
 }
 
 final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -79,9 +94,10 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cachedTranscriptionModels: [OllamaModel] = []
     private var cachedCorrectionModels: [OllamaModel] = []
     private var cachedMaintenance: PanelMaintenance?
+    private var autoPreparingCorrectionModel = false
+    private var lastAutoPreparedCorrectionModel = ""
     private var lastInputProbeResult = "未测试"
     private var isPanelScanInFlight = false
-    private var lastPanelScanAt = Date.distantPast
     private var isInputProbeInFlight = false
     private var timer: Timer?
     private var isProcessingTrigger = false
@@ -178,6 +194,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.onUnloadCorrectionModel = { [weak self] in
             self?.unloadCurrentCorrectionModel(nil)
         }
+        controller.onUnloadOllamaModel = { [weak self] model in
+            self?.unloadOllamaModel(model)
+        }
         controller.onProbeInput = { [weak self] in
             self?.runInputProbeForPanel()
         }
@@ -187,9 +206,19 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panelController = controller
 
         let popover = NSPopover()
+        controller.onPreferredContentSizeChange = { [weak popover] size in
+            guard let popover else {
+                return
+            }
+            if abs(popover.contentSize.width - size.width) > 0.5
+                || abs(popover.contentSize.height - size.height) > 0.5 {
+                popover.contentSize = size
+            }
+        }
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 420, height: 560)
         popover.contentViewController = controller
+        controller.loadViewIfNeeded()
+        popover.contentSize = controller.preferredContentSize
         self.popover = popover
     }
 
@@ -296,7 +325,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let maintenance = cachedMaintenance ?? PanelMaintenance(
             pythonPath: pythonPath,
             launchAgentStatus: "com.codexvoice.agent",
-            ollamaStatus: "正在扫描"
+            ollamaStatus: "正在扫描",
+            ollamaStatusCode: "scanning",
+            ollamaBaseURL: ""
         )
         controller.update(
             status: voiceStatus,
@@ -313,13 +344,10 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshPanelScanIfNeeded(force: Bool) {
-        guard popover?.isShown == true || force else {
+        guard force else {
             return
         }
         if isPanelScanInFlight {
-            return
-        }
-        if !force && Date().timeIntervalSince(lastPanelScanAt) < 3 {
             return
         }
 
@@ -331,7 +359,11 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let launchStatus = self.readLaunchAgentSummary()
             let ollamaStatus: String
             if scan.available {
-                ollamaStatus = "可用"
+                ollamaStatus = scan.baseURL.isEmpty ? "可用" : "可用：\(scan.baseURL)"
+            } else if scan.status == "ollama_not_installed" {
+                ollamaStatus = "Ollama 未安装"
+            } else if scan.status == "service_unavailable" {
+                ollamaStatus = scan.error.isEmpty ? "服务未就绪" : "服务未就绪：\(scan.error)"
             } else if scan.error.isEmpty {
                 ollamaStatus = "不可用"
             } else {
@@ -340,15 +372,17 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let maintenance = PanelMaintenance(
                 pythonPath: self.pythonPath,
                 launchAgentStatus: launchStatus,
-                ollamaStatus: ollamaStatus
+                ollamaStatus: ollamaStatus,
+                ollamaStatusCode: scan.status,
+                ollamaBaseURL: scan.baseURL
             )
             DispatchQueue.main.async {
                 self.cachedInputDevices = devices
                 self.cachedTranscriptionModels = scan.transcriptionModels
                 self.cachedCorrectionModels = scan.correctionModels
                 self.cachedMaintenance = maintenance
-                self.lastPanelScanAt = Date()
                 self.isPanelScanInFlight = false
+                self.maybeAutoPrepareCorrectionModel(scan)
                 self.refreshPanel()
             }
         }
@@ -421,23 +455,23 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func titleForStatus(_ status: String, stale: Bool) -> String {
         if stale {
-            return "● CV"
+            return "●"
         }
         switch status {
         case "recording":
             return "● REC"
         case "submitting", "transcribing", "correcting", "finalizing":
-            return "● CV"
+            return "● REC"
         case "error":
-            return "● CV"
+            return "●"
         default:
-            return "● CV"
+            return "●"
         }
     }
 
     private func colorForStatus(_ status: String, stale: Bool) -> NSColor {
         if stale {
-            return .black
+            return .white
         }
         switch status {
         case "recording":
@@ -447,7 +481,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "error":
             return .systemRed
         default:
-            return .black
+            return .white
         }
     }
 
@@ -680,8 +714,6 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(disabledMenuItem("外接在线 API"))
         menu.addItem(disabledMenuItem("OpenAI API（未启用）"))
-        menu.addItem(.separator())
-        menu.addItem(actionMenuItem("预热当前转录模型", #selector(warmCurrentTranscriptionModel(_:))))
     }
 
     private func currentCorrectionProfile(_ config: [String: Any]) -> String {
@@ -743,9 +775,6 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(disabledMenuItem("外接在线 API"))
         menu.addItem(disabledMenuItem("OpenAI API（未启用）"))
-        menu.addItem(.separator())
-        menu.addItem(actionMenuItem("预热当前纠错模型", #selector(warmCurrentCorrectionModel(_:))))
-        menu.addItem(actionMenuItem("从内存卸载当前纠错模型", #selector(unloadCurrentCorrectionModel(_:))))
     }
 
     private func appendModelTaskMenuItems(_ menu: NSMenu, scope: String) {
@@ -829,7 +858,12 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             appendLog("Could not list Ollama models: \(result.output)")
             return OllamaScan(
                 available: false,
+                status: "service_unavailable",
                 error: result.output,
+                baseURL: "",
+                configuredCorrectionModel: "",
+                configuredCorrectionModelInstalled: false,
+                configuredCorrectionModelLoaded: false,
                 transcriptionModels: [],
                 correctionModels: []
             )
@@ -841,7 +875,12 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             appendLog("Could not parse Ollama model list: \(result.output)")
             return OllamaScan(
                 available: false,
+                status: "parse_error",
                 error: "模型扫描结果不可解析",
+                baseURL: "",
+                configuredCorrectionModel: "",
+                configuredCorrectionModelInstalled: false,
+                configuredCorrectionModelLoaded: false,
                 transcriptionModels: [],
                 correctionModels: []
             )
@@ -856,22 +895,78 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     return nil
                 }
                 let capabilities = item["capabilities"] as? [String] ?? []
+                let details = item["details"] as? [String: Any] ?? [:]
+                let size = (item["size"] as? NSNumber)?.int64Value
                 return OllamaModel(
                     name: name,
                     capabilities: capabilities,
-                    needsTest: item["transcription_needs_test"] as? Bool ?? false
+                    needsTest: item["transcription_needs_test"] as? Bool ?? false,
+                    loaded: item["loaded"] as? Bool ?? false,
+                    size: size,
+                    family: details["family"] as? String ?? "",
+                    families: details["families"] as? [String] ?? [],
+                    parameterSize: details["parameter_size"] as? String ?? "",
+                    quantization: details["quantization_level"] as? String ?? ""
                 )
             }
         }
 
         let available = dict["available"] as? Bool ?? false
+        let status = dict["status"] as? String ?? (available ? "available" : "service_unavailable")
         let error = dict["error"] as? String ?? ""
+        let baseURL = dict["base_url"] as? String ?? ""
+        let configuredCorrectionModel = dict["configured_correction_model"] as? String ?? ""
+        let configuredCorrectionModelInstalled = dict["configured_correction_model_installed"] as? Bool ?? false
+        let configuredCorrectionModelLoaded = dict["configured_correction_model_loaded"] as? Bool ?? false
         return OllamaScan(
             available: available,
+            status: status,
             error: error,
+            baseURL: baseURL,
+            configuredCorrectionModel: configuredCorrectionModel,
+            configuredCorrectionModelInstalled: configuredCorrectionModelInstalled,
+            configuredCorrectionModelLoaded: configuredCorrectionModelLoaded,
             transcriptionModels: parseModels("transcription_models"),
             correctionModels: parseModels("correction_models")
         )
+    }
+
+    private func maybeAutoPrepareCorrectionModel(_ scan: OllamaScan) {
+        let model = scan.configuredCorrectionModel
+        guard scan.available,
+              scan.configuredCorrectionModelInstalled,
+              !scan.configuredCorrectionModelLoaded,
+              !model.isEmpty else {
+            return
+        }
+        let config = readConfig()
+        let backend = config["correction_backend"] as? String ?? "ollama"
+        let profile = config["correction_profile"] as? String ?? ""
+        guard backend == "ollama" || profile == "ollama-correction" else {
+            return
+        }
+        if autoPreparingCorrectionModel || lastAutoPreparedCorrectionModel == model {
+            return
+        }
+        if let task = readModelTask(),
+           task.status == "running",
+           task.scope == "correction" {
+            return
+        }
+
+        autoPreparingCorrectionModel = true
+        lastAutoPreparedCorrectionModel = model
+        appendLog("Auto preparing Ollama correction model: \(model)")
+        runModelTask(["--prepare-current-correction-model"]) { [weak self] exitCode in
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+                self.autoPreparingCorrectionModel = false
+                self.appendLog("Auto prepare correction model finished: \(model), exit=\(exitCode)")
+                self.refreshPanelScanIfNeeded(force: true)
+            }
+        }
     }
 
     private func readLaunchAgentSummary() -> String {
@@ -962,7 +1057,21 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshPanel()
     }
 
-    private func runModelTask(_ arguments: [String]) {
+    private func unloadOllamaModel(_ model: String) {
+        lastAutoPreparedCorrectionModel = model
+        runModelTask(["--unload-ollama-model", model]) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.refreshPanelScanIfNeeded(force: true)
+            }
+        }
+        refreshCorrectionModelMenu()
+        refreshPanel()
+    }
+
+    private func runModelTask(
+        _ arguments: [String],
+        completion: ((Int32) -> Void)? = nil
+    ) {
         DispatchQueue.global(qos: .utility).async {
             let exitCode = self.runProcessAndWait(
                 self.pythonPath,
@@ -972,6 +1081,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 "Model task finished: \(arguments.joined(separator: " ")), "
                 + "exit=\(exitCode)"
             )
+            completion?(exitCode)
         }
     }
 
@@ -1037,7 +1147,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return InputDevice(
                 name: name,
-                isDefault: item["default"] as? Bool ?? false
+                isDefault: item["default"] as? Bool ?? false,
+                channels: (item["channels"] as? NSNumber)?.intValue,
+                index: (item["index"] as? NSNumber)?.intValue
             )
         }
     }
@@ -1444,6 +1556,504 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
+private func dragEnclosingHorizontalScrollView(from view: NSView, event: NSEvent) -> Bool {
+    guard let scrollView = view.enclosingScrollView,
+          let window = view.window else {
+        return false
+    }
+
+    let startLocation = event.locationInWindow
+    let startOrigin = scrollView.contentView.bounds.origin
+    var didDrag = false
+    var shouldContinue = true
+
+    while shouldContinue {
+        guard let nextEvent = window.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp]
+        ) else {
+            break
+        }
+
+        switch nextEvent.type {
+        case .leftMouseDragged:
+            let deltaX = nextEvent.locationInWindow.x - startLocation.x
+            if abs(deltaX) > 3 {
+                didDrag = true
+            }
+            if didDrag {
+                let documentWidth = scrollView.documentView?.bounds.width ?? 0
+                let visibleWidth = scrollView.contentView.bounds.width
+                let maxX = max(0, documentWidth - visibleWidth)
+                let nextX = min(max(startOrigin.x - deltaX, 0), maxX)
+                scrollView.contentView.scroll(to: NSPoint(x: nextX, y: startOrigin.y))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+        case .leftMouseUp:
+            shouldContinue = false
+        default:
+            break
+        }
+    }
+
+    return didDrag
+}
+
+final class CircleControl: NSControl {
+    var fillColor: NSColor {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    private let diameter: CGFloat
+
+    init(color: NSColor, diameter: CGFloat) {
+        fillColor = color
+        self.diameter = diameter
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let rect = NSRect(
+            x: (bounds.width - diameter) / 2,
+            y: (bounds.height - diameter) / 2,
+            width: diameter,
+            height: diameter
+        )
+        fillColor.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else {
+            return
+        }
+        if let target, let action {
+            NSApp.sendAction(action, to: target, from: self)
+        }
+    }
+}
+
+final class CardCloseButton: NSControl {
+    private var pressed = false
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        toolTip = "卸载模型"
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let diameter = min(bounds.width, bounds.height)
+        let rect = NSRect(
+            x: (bounds.width - diameter) / 2,
+            y: (bounds.height - diameter) / 2,
+            width: diameter,
+            height: diameter
+        ).insetBy(dx: 1, dy: 1)
+        let fill = pressed
+            ? NSColor.systemRed
+            : NSColor(calibratedRed: 0.95, green: 0.22, blue: 0.20, alpha: 0.82)
+        fill.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+
+        NSColor.white.setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = 1.6
+        path.lineCapStyle = .round
+        let inset = rect.width * 0.32
+        path.move(to: NSPoint(x: rect.minX + inset, y: rect.minY + inset))
+        path.line(to: NSPoint(x: rect.maxX - inset, y: rect.maxY - inset))
+        path.move(to: NSPoint(x: rect.maxX - inset, y: rect.minY + inset))
+        path.line(to: NSPoint(x: rect.minX + inset, y: rect.maxY - inset))
+        path.stroke()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else {
+            return
+        }
+        pressed = true
+        needsDisplay = true
+        defer {
+            pressed = false
+            needsDisplay = true
+        }
+
+        guard let window,
+              let nextEvent = window.nextEvent(matching: [.leftMouseUp]) else {
+            return
+        }
+        let location = convert(nextEvent.locationInWindow, from: nil)
+        guard bounds.contains(location) else {
+            return
+        }
+        if let target, let action {
+            NSApp.sendAction(action, to: target, from: self)
+        }
+    }
+}
+
+final class AudioWaveformView: NSView {
+    private var levels = Array(repeating: CGFloat(0.08), count: 64)
+    private var timer: Timer?
+    private var active = false
+    private var targetLevel = CGFloat(0.28)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setActive(_ isActive: Bool, level: CGFloat) {
+        active = isActive
+        targetLevel = max(0.06, min(1.0, level))
+        if active {
+            startTimerIfNeeded()
+        } else {
+            stopTimer()
+            levels = levels.map { max(0.04, $0 * 0.72) }
+            needsDisplay = true
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            stopTimer()
+        } else if active {
+            startTimerIfNeeded()
+        }
+    }
+
+    private func startTimerIfNeeded() {
+        guard timer == nil else {
+            return
+        }
+        let timer = Timer(timeInterval: 0.075, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func tick() {
+        let pulse = CGFloat.random(in: 0.45...1.0)
+        let floor = CGFloat.random(in: 0.03...0.13)
+        let next = max(floor, min(1.0, targetLevel * pulse + floor))
+        levels.removeFirst()
+        levels.append(next)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let count = max(1, levels.count)
+        let gap = CGFloat(2)
+        let barWidth = max(2, (bounds.width - CGFloat(count - 1) * gap) / CGFloat(count))
+        let midY = bounds.midY
+        let color = active
+            ? NSColor(calibratedRed: 0.38, green: 1.0, blue: 0.55, alpha: 0.88)
+            : NSColor(calibratedWhite: 0.45, alpha: 0.42)
+        color.setFill()
+
+        for (index, level) in levels.enumerated() {
+            let height = max(2, min(bounds.height - 2, level * (bounds.height - 2)))
+            let x = CGFloat(index) * (barWidth + gap)
+            let rect = NSRect(
+                x: x,
+                y: midY - height / 2,
+                width: barWidth,
+                height: height
+            )
+            NSBezierPath(roundedRect: rect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+        }
+    }
+}
+
+final class CardChoiceView: NSControl {
+    private enum Metrics {
+        static let topPadding: CGFloat = 6
+        static let bottomPadding: CGFloat = 6
+        static let sidePadding: CGFloat = 12
+        static let contentSpacing: CGFloat = 2
+        static let titleDetailsSpacing: CGFloat = 4
+    }
+
+    private let sourceLabel = NSTextField(labelWithString: "")
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let contentStack = NSStackView()
+    private let unloadButton = CardCloseButton()
+    private let loadingOverlay = NSView()
+    private let loadingLabel = NSTextField(labelWithString: "正在加载")
+    private let loadingDetailLabel = NSTextField(labelWithString: " ")
+    private let loadingProgress = NSProgressIndicator()
+    private var uniformHeightConstraint: NSLayoutConstraint?
+    private(set) var isSelectedCard = false
+
+    init(
+        source: String,
+        title: String,
+        rows: [(String, String)],
+        selected: Bool,
+        enabled: Bool,
+        width: CGFloat
+    ) {
+        super.init(frame: .zero)
+        isSelectedCard = selected
+        isEnabled = enabled
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+        setCardStyle(selected: selected, enabled: enabled)
+        toolTip = ([source, title] + rows.map { "\($0.0)：\($0.1)" }).joined(separator: "\n")
+
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: width).isActive = true
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+
+        contentStack.orientation = .vertical
+        contentStack.spacing = Metrics.contentSpacing
+        contentStack.alignment = .leading
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(contentStack)
+        NSLayoutConstraint.activate([
+            contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Metrics.sidePadding),
+            contentStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.sidePadding),
+            contentStack.topAnchor.constraint(equalTo: topAnchor, constant: Metrics.topPadding),
+            contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Metrics.bottomPadding)
+        ])
+
+        sourceLabel.stringValue = source
+        sourceLabel.font = NSFont.systemFont(ofSize: 9, weight: .semibold)
+        sourceLabel.textColor = selected
+            ? NSColor(calibratedRed: 0.76, green: 1.0, blue: 0.82, alpha: 1)
+            : NSColor(calibratedWhite: enabled ? 0.72 : 0.48, alpha: 1)
+        sourceLabel.lineBreakMode = .byTruncatingTail
+        sourceLabel.widthAnchor.constraint(equalToConstant: width - 24).isActive = true
+        contentStack.addArrangedSubview(sourceLabel)
+
+        titleLabel.stringValue = title
+        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        titleLabel.textColor = NSColor(calibratedWhite: enabled ? 0.96 : 0.58, alpha: 1)
+        titleLabel.lineBreakMode = .byWordWrapping
+        titleLabel.maximumNumberOfLines = 2
+        titleLabel.widthAnchor.constraint(equalToConstant: width - 24).isActive = true
+        contentStack.addArrangedSubview(titleLabel)
+        contentStack.setCustomSpacing(Metrics.titleDetailsSpacing, after: titleLabel)
+
+        let gridRows = rows.map { row -> [NSView] in
+            let key = NSTextField(labelWithString: row.0)
+            key.font = NSFont.systemFont(ofSize: 9, weight: .medium)
+            key.textColor = NSColor(calibratedWhite: enabled ? 0.62 : 0.42, alpha: 1)
+            key.alignment = .right
+            key.widthAnchor.constraint(equalToConstant: 30).isActive = true
+
+            let value = NSTextField(labelWithString: row.1)
+            value.font = NSFont.systemFont(ofSize: 9)
+            value.textColor = NSColor(calibratedWhite: enabled ? 0.84 : 0.50, alpha: 1)
+            value.lineBreakMode = .byTruncatingMiddle
+            value.maximumNumberOfLines = 1
+            value.widthAnchor.constraint(equalToConstant: width - 70).isActive = true
+            return [key, value]
+        }
+
+        let gridView = NSGridView(views: gridRows)
+        gridView.translatesAutoresizingMaskIntoConstraints = false
+        gridView.rowSpacing = 1
+        gridView.columnSpacing = 6
+        gridView.widthAnchor.constraint(equalToConstant: width - 24).isActive = true
+        contentStack.addArrangedSubview(gridView)
+
+        configureUnloadButton()
+        configureLoadingOverlay()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if dragEnclosingHorizontalScrollView(from: self, event: event) {
+            return
+        }
+        guard isEnabled else {
+            return
+        }
+        if let target, let action {
+            NSApp.sendAction(action, to: target, from: self)
+        }
+    }
+
+    func naturalHeight() -> CGFloat {
+        contentStack.layoutSubtreeIfNeeded()
+        let contentHeight = contentStack.arrangedSubviews.reduce(CGFloat.zero) { height, view in
+            view.layoutSubtreeIfNeeded()
+            return height + view.fittingSize.height
+        }
+        return ceil(
+            contentHeight
+                + Metrics.contentSpacing
+                + Metrics.titleDetailsSpacing
+                + Metrics.topPadding
+                + Metrics.bottomPadding
+        )
+    }
+
+    func applyUniformHeight(_ height: CGFloat) {
+        let height = ceil(height)
+        if let uniformHeightConstraint {
+            uniformHeightConstraint.constant = height
+        } else {
+            let constraint = heightAnchor.constraint(equalToConstant: height)
+            constraint.isActive = true
+            uniformHeightConstraint = constraint
+        }
+    }
+
+    func setLoadingTask(_ task: ModelTask?) {
+        guard let task else {
+            loadingProgress.stopAnimation(nil)
+            loadingOverlay.isHidden = true
+            return
+        }
+
+        loadingOverlay.isHidden = false
+        loadingLabel.stringValue = task.label.isEmpty ? "正在准备模型" : task.label
+        loadingDetailLabel.stringValue = task.detail.isEmpty ? "正在加载到内存" : task.detail
+
+        if let progress = task.progress {
+            loadingProgress.stopAnimation(nil)
+            loadingProgress.isIndeterminate = false
+            loadingProgress.minValue = 0
+            loadingProgress.maxValue = 1
+            loadingProgress.doubleValue = max(0, min(1, progress))
+        } else {
+            loadingProgress.isIndeterminate = true
+            loadingProgress.startAnimation(nil)
+        }
+    }
+
+    func setUnloadAction(value: String, target: AnyObject?, action: Selector) {
+        unloadButton.identifier = NSUserInterfaceItemIdentifier(value)
+        unloadButton.target = target
+        unloadButton.action = action
+        unloadButton.isHidden = false
+    }
+
+    private func setCardStyle(selected: Bool, enabled: Bool) {
+        let background: NSColor
+        let border: NSColor
+        if selected {
+            background = NSColor(calibratedRed: 0.05, green: 0.62, blue: 0.25, alpha: 0.30)
+            border = NSColor(calibratedRed: 0.35, green: 1.0, blue: 0.52, alpha: 0.78)
+        } else if enabled {
+            background = NSColor(calibratedWhite: 0.035, alpha: 0.94)
+            border = NSColor(calibratedWhite: 0.24, alpha: 0.78)
+        } else {
+            background = NSColor(calibratedWhite: 0.08, alpha: 0.78)
+            border = NSColor(calibratedWhite: 0.18, alpha: 0.66)
+        }
+        layer?.backgroundColor = background.usingColorSpace(.deviceRGB)?.cgColor
+        layer?.borderColor = border.usingColorSpace(.deviceRGB)?.cgColor
+        layer?.borderWidth = selected ? 1.5 : 1
+    }
+
+    private func configureUnloadButton() {
+        unloadButton.isHidden = true
+        addSubview(unloadButton)
+        NSLayoutConstraint.activate([
+            unloadButton.widthAnchor.constraint(equalToConstant: 15),
+            unloadButton.heightAnchor.constraint(equalToConstant: 15),
+            unloadButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            unloadButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)
+        ])
+    }
+
+    private func configureLoadingOverlay() {
+        loadingOverlay.translatesAutoresizingMaskIntoConstraints = false
+        loadingOverlay.wantsLayer = true
+        loadingOverlay.layer?.backgroundColor = NSColor(
+            calibratedWhite: 0.12,
+            alpha: 0.82
+        ).usingColorSpace(.deviceRGB)?.cgColor
+        loadingOverlay.layer?.cornerRadius = 8
+        loadingOverlay.isHidden = true
+        addSubview(loadingOverlay)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 5
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        loadingOverlay.addSubview(stack)
+
+        loadingLabel.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        loadingLabel.textColor = .white
+        loadingLabel.lineBreakMode = .byTruncatingMiddle
+        loadingDetailLabel.font = NSFont.systemFont(ofSize: 9)
+        loadingDetailLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
+        loadingDetailLabel.lineBreakMode = .byTruncatingMiddle
+
+        loadingProgress.style = .bar
+        loadingProgress.controlSize = .small
+        loadingProgress.widthAnchor.constraint(equalToConstant: 160).isActive = true
+
+        stack.addArrangedSubview(loadingLabel)
+        stack.addArrangedSubview(loadingDetailLabel)
+        stack.addArrangedSubview(loadingProgress)
+
+        NSLayoutConstraint.activate([
+            loadingOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            loadingOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            loadingOverlay.topAnchor.constraint(equalTo: topAnchor),
+            loadingOverlay.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: loadingOverlay.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: loadingOverlay.trailingAnchor, constant: -14),
+            stack.centerYAnchor.constraint(equalTo: loadingOverlay.centerYAnchor)
+        ])
+    }
+}
+
+final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        _ = dragEnclosingHorizontalScrollView(from: self, event: event)
+    }
+}
+
 final class CodexVoicePanelController: NSViewController {
     var onToggleRecording: (() -> Void)?
     var onSubmitRecording: (() -> Void)?
@@ -1461,8 +2071,26 @@ final class CodexVoicePanelController: NSViewController {
     var onWarmTranscriptionModel: (() -> Void)?
     var onWarmCorrectionModel: (() -> Void)?
     var onUnloadCorrectionModel: (() -> Void)?
+    var onUnloadOllamaModel: ((String) -> Void)?
     var onProbeInput: (() -> Void)?
     var onSetMaxMinutes: ((Double) -> Void)?
+    var onPreferredContentSizeChange: ((NSSize) -> Void)?
+
+    private enum Metrics {
+        static let panelWidth: CGFloat = 520
+        static let contentWidth: CGFloat = 492
+        static let cardSpacing: CGFloat = 10
+        static let cardScrollerInset: CGFloat = 10
+        static let cardScrollerTopInset: CGFloat = 3
+        static let cardScrollerBottomInset: CGFloat = 3
+        static let modelCardWidth: CGFloat = 231
+        static let inputCardWidth: CGFloat = 231
+        static let cardViewportWidth: CGFloat = cardScrollerInset * 2 + cardSpacing + modelCardWidth * 2
+        static let tabDocumentWidth: CGFloat = contentWidth
+        static let tabInnerWidth: CGFloat = contentWidth
+        static let routeLabelWidth: CGFloat = 54
+        static let maintenanceLabelWidth: CGFloat = 86
+    }
 
     private var currentStatus = VoiceStatus(
         status: "idle",
@@ -1483,67 +2111,103 @@ final class CodexVoicePanelController: NSViewController {
     private var currentMaintenance = PanelMaintenance(
         pythonPath: "",
         launchAgentStatus: "com.codexvoice.agent",
-        ollamaStatus: "正在扫描"
+        ollamaStatus: "正在扫描",
+        ollamaStatusCode: "scanning",
+        ollamaBaseURL: ""
     )
-    private var selectedTab = 0
 
-    private let statusDot = NSTextField(labelWithString: "●")
+    private var transcriptionSignature = ""
+    private var correctionSignature = ""
+    private var inputSignature = ""
+
+    private var inputTestActive = false
+    private var selectedTabIndex = 0
+    private var tabContainerHeightConstraint: NSLayoutConstraint?
+    private var transcriptionCardScrollerHeightConstraint: NSLayoutConstraint?
+    private var correctionCardScrollerHeightConstraint: NSLayoutConstraint?
+    private var inputCardScrollerHeightConstraint: NSLayoutConstraint?
+    private var rootStack: NSStackView?
+
+    private let statusDot = CircleControl(color: .white, diameter: 9)
     private let statusLabel = NSTextField(labelWithString: "空闲")
-    private let durationLabel = NSTextField(labelWithString: "录音上限：5 分钟")
+    private let durationLabel = NSTextField(labelWithString: "0:00 /")
+    private let maxMinutesPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let stageLabel = NSTextField(labelWithString: "阶段：空闲")
     private let modelTaskLabel = NSTextField(labelWithString: "模型：空闲")
     private let modelTaskDetailLabel = NSTextField(labelWithString: " ")
     private let modelProgress = NSProgressIndicator()
+    private let waveformView = AudioWaveformView()
+    private let quitButton = CircleControl(color: .systemRed, diameter: 11)
+
     private let startButton = NSButton(title: "开始", target: nil, action: nil)
     private let submitButton = NSButton(title: "提交", target: nil, action: nil)
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
-    private let indicatorButton = NSButton(checkboxWithTitle: "浮窗", target: nil, action: nil)
-    private let routeLabel = NSTextField(labelWithString: "路线：推荐")
-    private let transcriptionSummaryLabel = NSTextField(labelWithString: "转录：")
-    private let correctionSummaryLabel = NSTextField(labelWithString: "纠错：")
-    private let inputSummaryLabel = NSTextField(labelWithString: "输入：")
+    private let indicatorButton = NSButton(title: "", target: nil, action: nil)
+
+    private let stateValueLabel = NSTextField(labelWithString: "空闲")
+    private let transcriptionValueLabel = NSTextField(labelWithString: "")
+    private let correctionValueLabel = NSTextField(labelWithString: "")
+    private let inputValueLabel = NSTextField(labelWithString: "")
+
+    private let tabContainer = NSView()
     private let tabControl = NSSegmentedControl(
-        labels: ["转录", "纠错", "输入", "维护"],
+        labels: ["转录模型", "纠错模型", "输入设备"],
         trackingMode: .selectOne,
         target: nil,
         action: nil
     )
-    private let tabScrollView = NSScrollView()
-    private let tabDocumentView = NSView()
-    private let tabStack = NSStackView()
-    private let maxMinutesLabel = NSTextField(labelWithString: "")
+    private let transcriptionDocument = NSView()
+    private let correctionDocument = NSView()
+    private let inputDocument = NSView()
+
+    private let transcriptionContentStack = NSStackView()
+    private let correctionContentStack = NSStackView()
+    private let inputContentStack = NSStackView()
+
+    private let transcriptionCardsDocument = FlippedDocumentView()
+    private let transcriptionCardsStack = NSStackView()
+    private let correctionCardsDocument = FlippedDocumentView()
+    private let correctionCardsStack = NSStackView()
+    private let inputCardsDocument = FlippedDocumentView()
+    private let inputCardsStack = NSStackView()
+
+    private let probeButton = NSButton(title: "测试输入", target: nil, action: nil)
+    private let probeResultLabel = NSTextField(labelWithString: "未测试")
+    private let maxMinutesLabel = NSTextField(labelWithString: "录音上限：5 分钟")
+    private let maxMinutesStepper = NSStepper()
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 560))
+        view = NSView(frame: NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: 1))
+        preferredContentSize = NSSize(width: Metrics.panelWidth, height: 1)
 
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.spacing = 10
-        root.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 12, right: 14)
-        root.translatesAutoresizingMaskIntoConstraints = false
+        let root = verticalStack(spacing: 6)
+        rootStack = root
+        root.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 8, right: 14)
         view.addSubview(root)
         NSLayoutConstraint.activate([
             root.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            root.topAnchor.constraint(equalTo: view.topAnchor),
-            root.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            root.topAnchor.constraint(equalTo: view.topAnchor)
         ])
 
-        root.addArrangedSubview(makeStatusArea())
+        let statusArea = makeStatusArea()
+        root.addArrangedSubview(statusArea)
+        root.setCustomSpacing(0, after: statusArea)
+        root.addArrangedSubview(separator())
         root.addArrangedSubview(makeQuickActions())
+        root.addArrangedSubview(separator())
+        root.addArrangedSubview(makeTabView())
+        root.addArrangedSubview(separator())
         root.addArrangedSubview(makeRouteArea())
 
-        tabControl.target = self
-        tabControl.action = #selector(tabChanged(_:))
-        tabControl.selectedSegment = selectedTab
-        root.addArrangedSubview(tabControl)
+        buildStableTabContent()
+        refreshStaticAndDynamicViews()
+    }
 
-        configureTabScrollView()
-        root.addArrangedSubview(tabScrollView)
-        tabScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 230).isActive = true
-
-        root.addArrangedSubview(makeBottomTools())
-        refreshAllViews()
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        inputTestActive = false
+        waveformView.setActive(false, level: 0.08)
     }
 
     func update(
@@ -1559,6 +2223,9 @@ final class CodexVoicePanelController: NSViewController {
         maintenance: PanelMaintenance
     ) {
         currentStatus = status
+        if status.status != "idle" {
+            inputTestActive = false
+        }
         currentConfig = config
         currentModelTask = modelTask
         currentInputDevices = inputDevices
@@ -1569,49 +2236,76 @@ final class CodexVoicePanelController: NSViewController {
         scanningModels = isScanningModels
         currentMaintenance = maintenance
         if isViewLoaded {
-            refreshAllViews()
+            refreshStaticAndDynamicViews()
         }
     }
 
     private func makeStatusArea() -> NSView {
-        let container = verticalStack(spacing: 6)
+        let container = verticalStack(spacing: 0)
+        container.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        container.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        container.setContentHuggingPriority(.required, for: .vertical)
+        container.setContentCompressionResistancePriority(.required, for: .vertical)
 
         let row = horizontalStack(spacing: 8)
-        statusDot.font = NSFont.systemFont(ofSize: 16, weight: .bold)
+        statusDot.target = self
+        statusDot.action = #selector(statusDotClicked(_:))
+        statusDot.toolTip = "点击测试当前输入，再点停止测试"
+        statusDot.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        statusDot.heightAnchor.constraint(equalToConstant: 18).isActive = true
         statusLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.widthAnchor.constraint(equalToConstant: 250).isActive = true
+        durationLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        durationLabel.textColor = .secondaryLabelColor
+        durationLabel.alignment = .right
+        durationLabel.widthAnchor.constraint(equalToConstant: 54).isActive = true
+        maxMinutesPopup.controlSize = .small
+        maxMinutesPopup.font = NSFont.systemFont(ofSize: 11)
+        maxMinutesPopup.removeAllItems()
+        for minute in 1...10 {
+            maxMinutesPopup.addItem(withTitle: "\(minute) 分钟")
+        }
+        maxMinutesPopup.target = self
+        maxMinutesPopup.action = #selector(maxMinutesPopupChanged(_:))
+        maxMinutesPopup.widthAnchor.constraint(equalToConstant: 74).isActive = true
+        quitButton.target = self
+        quitButton.action = #selector(quitClicked(_:))
+        quitButton.toolTip = "退出 Codex Voice Agent"
+        quitButton.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        quitButton.heightAnchor.constraint(equalToConstant: 18).isActive = true
         row.addArrangedSubview(statusDot)
         row.addArrangedSubview(statusLabel)
         row.addArrangedSubview(makeFlexibleSpacer())
         row.addArrangedSubview(durationLabel)
-        durationLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        durationLabel.textColor = .secondaryLabelColor
+        row.addArrangedSubview(maxMinutesPopup)
+        row.addArrangedSubview(quitButton)
         container.addArrangedSubview(row)
 
-        stageLabel.font = NSFont.systemFont(ofSize: 12)
-        stageLabel.textColor = .secondaryLabelColor
-        stageLabel.lineBreakMode = .byTruncatingMiddle
-        container.addArrangedSubview(stageLabel)
-
-        modelTaskLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        modelTaskLabel.lineBreakMode = .byTruncatingMiddle
-        container.addArrangedSubview(modelTaskLabel)
-
-        modelTaskDetailLabel.font = NSFont.systemFont(ofSize: 11)
-        modelTaskDetailLabel.textColor = .secondaryLabelColor
-        modelTaskDetailLabel.lineBreakMode = .byTruncatingMiddle
-        container.addArrangedSubview(modelTaskDetailLabel)
-
-        modelProgress.style = .bar
-        modelProgress.controlSize = .small
-        modelProgress.minValue = 0
-        modelProgress.maxValue = 1
-        modelProgress.usesThreadedAnimation = true
-        container.addArrangedSubview(modelProgress)
+        let waveformSlot = NSView()
+        waveformSlot.translatesAutoresizingMaskIntoConstraints = false
+        waveformSlot.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        waveformSlot.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        waveformSlot.addSubview(waveformView)
+        waveformView.translatesAutoresizingMaskIntoConstraints = false
+        waveformView.heightAnchor.constraint(equalToConstant: 10).isActive = true
+        waveformView.setContentHuggingPriority(.required, for: .vertical)
+        waveformView.setContentCompressionResistancePriority(.required, for: .vertical)
+        NSLayoutConstraint.activate([
+            waveformView.leadingAnchor.constraint(equalTo: waveformSlot.leadingAnchor),
+            waveformView.trailingAnchor.constraint(equalTo: waveformSlot.trailingAnchor),
+            waveformView.centerYAnchor.constraint(equalTo: waveformSlot.centerYAnchor)
+        ])
+        container.addArrangedSubview(waveformSlot)
         return container
     }
 
     private func makeQuickActions() -> NSView {
-        let row = horizontalStack(spacing: 8)
+        let row = horizontalStack(spacing: 6)
+        row.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        row.setContentHuggingPriority(.required, for: .vertical)
+        row.setContentCompressionResistancePriority(.required, for: .vertical)
+
         startButton.target = self
         startButton.action = #selector(startClicked(_:))
         submitButton.target = self
@@ -1620,83 +2314,122 @@ final class CodexVoicePanelController: NSViewController {
         cancelButton.action = #selector(cancelClicked(_:))
         indicatorButton.target = self
         indicatorButton.action = #selector(indicatorClicked(_:))
-        for button in [startButton, submitButton, cancelButton, indicatorButton] {
+
+        for button in [startButton, submitButton, cancelButton] {
             button.bezelStyle = .rounded
-            button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            button.controlSize = .small
+            button.widthAnchor.constraint(equalToConstant: 56).isActive = true
             row.addArrangedSubview(button)
         }
+        row.addArrangedSubview(makeFlexibleSpacer())
+        let microphoneButton = compactButton("麦克风授权", #selector(microphoneClicked(_:)), width: 76)
+        let accessibilityButton = compactButton("辅助功能授权", #selector(pasteClicked(_:)), width: 92)
+        row.addArrangedSubview(microphoneButton)
+        row.addArrangedSubview(accessibilityButton)
+        configureIndicatorButton()
+        row.addArrangedSubview(indicatorButton)
         return row
     }
 
     private func makeRouteArea() -> NSView {
-        let stack = verticalStack(spacing: 3)
-        for label in [routeLabel, transcriptionSummaryLabel, correctionSummaryLabel, inputSummaryLabel] {
-            label.font = NSFont.systemFont(ofSize: 12)
-            label.textColor = .secondaryLabelColor
-            label.lineBreakMode = .byTruncatingMiddle
-            stack.addArrangedSubview(label)
-        }
+        let stack = verticalStack(spacing: 4)
+        stack.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        stack.setContentHuggingPriority(.required, for: .vertical)
+        stack.setContentCompressionResistancePriority(.required, for: .vertical)
+        stack.addArrangedSubview(routeRow("状态", stateValueLabel))
+        stack.addArrangedSubview(routeRow("转录模型", transcriptionValueLabel))
+        stack.addArrangedSubview(routeRow("纠错模型", correctionValueLabel))
+        stack.addArrangedSubview(routeRow("输入设备", inputValueLabel))
         return stack
     }
 
-    private func configureTabScrollView() {
-        tabScrollView.hasVerticalScroller = true
-        tabScrollView.drawsBackground = false
-        tabScrollView.borderType = .noBorder
-        tabScrollView.translatesAutoresizingMaskIntoConstraints = false
-        tabDocumentView.frame = NSRect(x: 0, y: 0, width: 392, height: 260)
-        tabScrollView.documentView = tabDocumentView
+    private func makeTabView() -> NSView {
+        let container = verticalStack(spacing: 6)
+        container.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        container.setContentHuggingPriority(.required, for: .vertical)
+        container.setContentCompressionResistancePriority(.required, for: .vertical)
 
-        tabStack.orientation = .vertical
-        tabStack.spacing = 10
-        tabStack.translatesAutoresizingMaskIntoConstraints = false
-        tabDocumentView.addSubview(tabStack)
-        NSLayoutConstraint.activate([
-            tabStack.leadingAnchor.constraint(equalTo: tabDocumentView.leadingAnchor),
-            tabStack.trailingAnchor.constraint(equalTo: tabDocumentView.trailingAnchor, constant: -8),
-            tabStack.topAnchor.constraint(equalTo: tabDocumentView.topAnchor),
-            tabStack.bottomAnchor.constraint(equalTo: tabDocumentView.bottomAnchor)
-        ])
+        tabControl.target = self
+        tabControl.action = #selector(tabChanged(_:))
+        tabControl.selectedSegment = 0
+        tabControl.controlSize = .regular
+        tabControl.translatesAutoresizingMaskIntoConstraints = false
+        tabControl.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        container.addArrangedSubview(tabControl)
+
+        tabContainer.translatesAutoresizingMaskIntoConstraints = false
+        tabContainer.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        tabContainerHeightConstraint = tabContainer.heightAnchor.constraint(equalToConstant: 1)
+        tabContainerHeightConstraint?.isActive = true
+        addTabDocument(transcriptionDocument, content: transcriptionContentStack)
+        addTabDocument(correctionDocument, content: correctionContentStack)
+        addTabDocument(inputDocument, content: inputContentStack)
+        showTab(at: 0, updateSize: false)
+        container.addArrangedSubview(tabContainer)
+        return container
     }
 
-    private func makeBottomTools() -> NSView {
-        let stack = horizontalStack(spacing: 6)
-        let items: [(String, Selector)] = [
-            ("麦克风", #selector(microphoneClicked(_:))),
-            ("粘贴", #selector(pasteClicked(_:))),
-            ("记录", #selector(transcriptsClicked(_:))),
-            ("日志", #selector(logClicked(_:))),
-            ("配置", #selector(configClicked(_:)))
-        ]
-        for item in items {
-            let button = NSButton(title: item.0, target: self, action: item.1)
-            button.bezelStyle = .rounded
-            button.controlSize = .small
-            stack.addArrangedSubview(button)
-        }
-        stack.distribution = .fillEqually
-        return stack
+    private func buildStableTabContent() {
+        configureContentStack(transcriptionContentStack)
+        configureContentStack(correctionContentStack)
+        configureContentStack(inputContentStack)
+
+        configureCardStack(transcriptionCardsStack)
+        configureCardStack(correctionCardsStack)
+        configureCardStack(inputCardsStack)
+
+        transcriptionContentStack.addArrangedSubview(cardScroller(
+            document: transcriptionCardsDocument,
+            stack: transcriptionCardsStack,
+            setHeightConstraint: { self.transcriptionCardScrollerHeightConstraint = $0 }
+        ))
+
+        correctionContentStack.addArrangedSubview(cardScroller(
+            document: correctionCardsDocument,
+            stack: correctionCardsStack,
+            setHeightConstraint: { self.correctionCardScrollerHeightConstraint = $0 }
+        ))
+
+        inputContentStack.addArrangedSubview(cardScroller(
+            document: inputCardsDocument,
+            stack: inputCardsStack,
+            setHeightConstraint: { self.inputCardScrollerHeightConstraint = $0 }
+        ))
     }
 
-    private func refreshAllViews() {
+    private func refreshStaticAndDynamicViews() {
         refreshStatusArea()
         refreshQuickActions()
         refreshRouteArea()
-        rebuildCurrentTab()
+        refreshDynamicModelSections()
+        refreshInputProbeArea()
+        resizeVisibleTab()
+        updatePreferredContentSize()
     }
 
     private func refreshStatusArea() {
-        statusDot.textColor = colorForStatus(currentStatus.status, stale: currentStatus.isStale)
-        statusLabel.stringValue = currentStatus.label
-        durationLabel.stringValue = durationText()
+        let testingInput = currentStatus.status == "idle" && (inputTestActive || inputProbeInFlight)
+        statusDot.fillColor = testingInput
+            ? .systemGreen
+            : colorForStatus(currentStatus.status, stale: currentStatus.isStale)
+        setText(statusLabel, testingInput ? "测试输入" : currentStatus.label)
+        setText(durationLabel, durationText())
+        refreshMaxMinutesPopup()
+        waveformView.toolTip = testingInput ? currentInputProbeResult : nil
+        waveformView.setActive(
+            currentStatus.status == "recording" || testingInput,
+            level: testingInput ? probeLevelFromResult() : 0.42
+        )
 
         let stageDetail = currentStatus.detail.isEmpty ? currentStatus.label : currentStatus.detail
-        stageLabel.stringValue = "阶段：\(stageDetail)"
+        setText(stageLabel, "阶段：\(stageDetail)")
 
         guard let task = currentModelTask else {
-            modelTaskLabel.stringValue = "模型：空闲"
-            modelTaskDetailLabel.stringValue = " "
-            setProgress(value: 0, indeterminate: false)
+            setText(modelTaskLabel, "模型：空闲")
+            setText(modelTaskDetailLabel, " ")
+            modelProgress.stopAnimation(nil)
+            modelProgress.isHidden = true
+            modelProgress.doubleValue = 0
             return
         }
 
@@ -1707,8 +2440,14 @@ final class CodexVoicePanelController: NSViewController {
         case "failed": statusText = "失败"
         default: statusText = task.status
         }
-        modelTaskLabel.stringValue = "模型：\(statusText) · \(task.label)"
-        modelTaskDetailLabel.stringValue = task.detail.isEmpty ? " " : task.detail
+        setText(modelTaskLabel, "模型：\(statusText) · \(task.label)")
+        setText(modelTaskDetailLabel, task.detail.isEmpty ? " " : task.detail)
+        guard task.status == "running" else {
+            modelProgress.stopAnimation(nil)
+            modelProgress.isHidden = true
+            modelProgress.doubleValue = 0
+            return
+        }
         if task.status == "running", task.progress == nil {
             setProgress(value: nil, indeterminate: true)
         } else {
@@ -1722,124 +2461,215 @@ final class CodexVoicePanelController: NSViewController {
         startButton.isEnabled = !canControlRecording && !busyAfterRecording
         submitButton.isEnabled = canControlRecording
         cancelButton.isEnabled = canControlRecording
-        indicatorButton.state = configBool("recording_indicator", defaultValue: true) ? .on : .off
+        let indicatorEnabled = configBool("recording_indicator", defaultValue: true)
+        indicatorButton.state = indicatorEnabled ? .on : .off
+        setIndicatorButtonStyle(enabled: indicatorEnabled)
     }
 
     private func refreshRouteArea() {
-        let setup = stringConfig("setup_profile", defaultValue: "recommended")
-        routeLabel.stringValue = setup == "custom" ? "路线：自定义路线" : "路线：推荐路线"
-        transcriptionSummaryLabel.stringValue = "转录：\(transcriptionLabel())"
-        correctionSummaryLabel.stringValue = "纠错：\(correctionLabel())"
-        inputSummaryLabel.stringValue = "输入：\(inputLabel())"
+        let stateDetail = currentStatus.detail.isEmpty ? currentStatus.label : "\(currentStatus.label) · \(currentStatus.detail)"
+        setText(stateValueLabel, stateDetail)
+        setText(transcriptionValueLabel, transcriptionLabel())
+        setText(correctionValueLabel, correctionLabel())
+        setText(inputValueLabel, inputLabel())
     }
 
-    private func rebuildCurrentTab() {
-        tabControl.selectedSegment = selectedTab
-        tabStack.arrangedSubviews.forEach { view in
-            tabStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
+    private func refreshDynamicModelSections() {
+        let transcriptionSig = [
+            transcriptionProfile(),
+            stringConfig("ollama_transcription_model", defaultValue: ""),
+            currentTranscriptionModels.isEmpty && scanningModels ? "scanning" : "ready",
+            currentTranscriptionModels.map {
+                "\($0.name):\($0.needsTest):\($0.parameterSize):\($0.family):\($0.quantization)"
+            }.joined(separator: "|")
+        ].joined(separator: "||")
+        if transcriptionSig != transcriptionSignature {
+            transcriptionSignature = transcriptionSig
+            rebuildTranscriptionOptions()
+            layoutCardGroup(
+                document: transcriptionCardsDocument,
+                stack: transcriptionCardsStack,
+                scrollerHeightConstraint: transcriptionCardScrollerHeightConstraint
+            )
+            _ = resizeDocument(transcriptionDocument, content: transcriptionContentStack)
         }
 
-        switch selectedTab {
-        case 0:
-            buildTranscriptionTab()
-        case 1:
-            buildCorrectionTab()
-        case 2:
-            buildInputTab()
-        default:
-            buildMaintenanceTab()
+        let correctionSig = [
+            correctionProfile(),
+            stringConfig("ollama_model", defaultValue: ""),
+            currentMaintenance.ollamaStatusCode,
+            currentMaintenance.ollamaBaseURL,
+            currentCorrectionModels.isEmpty && scanningModels ? "scanning" : "ready",
+            currentCorrectionModels.map {
+                "\($0.name):\($0.loaded):\($0.parameterSize):\($0.family):\($0.quantization)"
+            }.joined(separator: "|")
+        ].joined(separator: "||")
+        if correctionSig != correctionSignature {
+            correctionSignature = correctionSig
+            rebuildCorrectionOptions()
+            layoutCardGroup(
+                document: correctionCardsDocument,
+                stack: correctionCardsStack,
+                scrollerHeightConstraint: correctionCardScrollerHeightConstraint
+            )
+            _ = resizeDocument(correctionDocument, content: correctionContentStack)
         }
 
-        tabStack.layoutSubtreeIfNeeded()
-        let fittingHeight = max(250, tabStack.fittingSize.height)
-        tabDocumentView.setFrameSize(NSSize(width: 392, height: fittingHeight))
+        let inputSig = [
+            currentConfig["input_device"] as? String ?? "",
+            currentInputDevices.isEmpty && scanningModels ? "scanning" : "ready",
+            currentInputDevices.map { "\($0.name):\($0.isDefault):\($0.channels ?? 0)" }.joined(separator: "|")
+        ].joined(separator: "||")
+        if inputSig != inputSignature {
+            inputSignature = inputSig
+            rebuildInputOptions()
+            layoutCardGroup(
+                document: inputCardsDocument,
+                stack: inputCardsStack,
+                scrollerHeightConstraint: inputCardScrollerHeightConstraint
+            )
+            _ = resizeDocument(inputDocument, content: inputContentStack)
+        }
+        refreshCardLoadingOverlays()
     }
 
-    private func buildTranscriptionTab() {
+    private func rebuildTranscriptionOptions() {
+        removeAllArrangedSubviews(from: transcriptionCardsStack)
+
         let profile = transcriptionProfile()
         let selectedOllama = stringConfig("ollama_transcription_model", defaultValue: "")
-
-        let builtin = columnStack(title: "内置")
-        builtin.addArrangedSubview(choiceButton(
+        transcriptionCardsStack.addArrangedSubview(cardButton(
+            source: "内置",
             title: "MLX Whisper large-v3-turbo",
+            parameter: "809M",
+            architecture: "Whisper Transformer",
+            vendor: "OpenAI / MLX",
             value: "profile:mlx-whisper-turbo",
             selected: profile == "mlx-whisper-turbo",
             action: #selector(transcriptionChoiceClicked(_:))
         ))
-        builtin.addArrangedSubview(choiceButton(
+        transcriptionCardsStack.addArrangedSubview(cardButton(
+            source: "内置",
             title: "faster-whisper large-v3-turbo",
+            parameter: "809M",
+            architecture: "Whisper Transformer",
+            vendor: "OpenAI / CTranslate2",
             value: "profile:faster-whisper-turbo",
             selected: profile == "faster-whisper-turbo",
             action: #selector(transcriptionChoiceClicked(_:))
         ))
 
-        let ollama = columnStack(title: "Ollama")
         if scanningModels {
-            ollama.addArrangedSubview(secondaryText("正在扫描..."))
+            transcriptionCardsStack.addArrangedSubview(statusCard("Ollama", "正在扫描", "参数：-", "架构：-", "厂家：Ollama"))
         } else if currentTranscriptionModels.isEmpty {
-            ollama.addArrangedSubview(secondaryText("未检测到转录模型"))
+            transcriptionCardsStack.addArrangedSubview(statusCard("Ollama", "未检测到转录模型", "参数：-", "架构：-", "厂家：Ollama"))
         } else {
             for model in currentTranscriptionModels {
                 let suffix = model.needsTest ? "（需测试）" : ""
-                ollama.addArrangedSubview(choiceButton(
+                transcriptionCardsStack.addArrangedSubview(cardButton(
+                    source: "Ollama",
                     title: "\(model.name)\(suffix)",
+                    parameter: parameterText(for: model),
+                    architecture: architectureText(for: model),
+                    vendor: vendorText(for: model),
                     value: "ollama:\(model.name)",
                     selected: profile == "ollama-transcription" && selectedOllama == model.name,
                     action: #selector(transcriptionChoiceClicked(_:))
                 ))
             }
         }
-
-        let external = columnStack(title: "在线 API")
-        external.addArrangedSubview(disabledButton("OpenAI API（未启用）"))
-
-        tabStack.addArrangedSubview(columns([builtin, ollama, external]))
-        tabStack.addArrangedSubview(actionRow([
-            ("预热当前转录模型", #selector(warmTranscriptionClicked(_:)))
-        ]))
+        transcriptionCardsStack.addArrangedSubview(cardButton(
+            source: "在线 API",
+            title: "OpenAI API（未启用）",
+            parameter: "云端",
+            architecture: "Audio API",
+            vendor: "OpenAI",
+            value: "external:openai-transcription",
+            selected: false,
+            action: #selector(transcriptionChoiceClicked(_:)),
+            enabled: false
+        ))
     }
 
-    private func buildCorrectionTab() {
+    private func rebuildCorrectionOptions() {
+        removeAllArrangedSubviews(from: correctionCardsStack)
+
         let profile = correctionProfile()
         let selectedOllama = stringConfig("ollama_model", defaultValue: "")
-
-        let builtin = columnStack(title: "内置")
-        builtin.addArrangedSubview(choiceButton(
+        correctionCardsStack.addArrangedSubview(cardButton(
+            source: "内置",
             title: "规则纠错（不使用 LLM）",
+            parameter: "0",
+            architecture: "规则引擎",
+            vendor: "Codex Voice",
             value: "profile:rule-only",
             selected: profile == "rule-only",
             action: #selector(correctionChoiceClicked(_:))
         ))
 
-        let ollama = columnStack(title: "Ollama")
         if scanningModels {
-            ollama.addArrangedSubview(secondaryText("正在扫描..."))
+            correctionCardsStack.addArrangedSubview(statusCard("Ollama", "正在扫描", "参数：-", "架构：-", "厂家：Ollama"))
         } else if currentCorrectionModels.isEmpty {
-            ollama.addArrangedSubview(secondaryText("未检测到纠错模型"))
+            correctionCardsStack.addArrangedSubview(statusCard(
+                "Ollama",
+                ollamaEmptyCorrectionTitle(selectedModel: selectedOllama),
+                "参数：\(ollamaStatusParameter())",
+                "架构：\(currentMaintenance.ollamaStatus)",
+                "厂家：Ollama"
+            ))
         } else {
             for model in currentCorrectionModels {
-                ollama.addArrangedSubview(choiceButton(
-                    title: model.name,
+                let suffix = model.loaded ? "" : "（待加载）"
+                correctionCardsStack.addArrangedSubview(cardButton(
+                    source: "Ollama",
+                    title: "\(model.name)\(suffix)",
+                    parameter: parameterText(for: model),
+                    architecture: architectureText(for: model),
+                    vendor: vendorText(for: model),
                     value: "ollama:\(model.name)",
                     selected: profile == "ollama-correction" && selectedOllama == model.name,
-                    action: #selector(correctionChoiceClicked(_:))
+                    action: #selector(correctionChoiceClicked(_:)),
+                    unloadValue: model.loaded ? model.name : nil,
+                    unloadAction: #selector(unloadOllamaModelClicked(_:))
                 ))
             }
         }
-
-        let external = columnStack(title: "在线 API")
-        external.addArrangedSubview(disabledButton("OpenAI API（未启用）"))
-
-        tabStack.addArrangedSubview(columns([builtin, ollama, external]))
-        tabStack.addArrangedSubview(actionRow([
-            ("预热当前纠错模型", #selector(warmCorrectionClicked(_:))),
-            ("从内存卸载", #selector(unloadCorrectionClicked(_:)))
-        ]))
+        correctionCardsStack.addArrangedSubview(cardButton(
+            source: "在线 API",
+            title: "OpenAI API（未启用）",
+            parameter: "云端",
+            architecture: "Chat API",
+            vendor: "OpenAI",
+            value: "external:openai-correction",
+            selected: false,
+            action: #selector(correctionChoiceClicked(_:)),
+            enabled: false
+        ))
     }
 
-    private func buildInputTab() {
-        let stack = verticalStack(spacing: 8)
+    private func ollamaEmptyCorrectionTitle(selectedModel: String) -> String {
+        switch currentMaintenance.ollamaStatusCode {
+        case "ollama_not_installed":
+            return "未检测到纠错模型"
+        case "service_unavailable":
+            return "Ollama 服务未就绪"
+        case "starting":
+            return "正在启动 Ollama"
+        default:
+            if !selectedModel.isEmpty {
+                return "未安装 \(selectedModel)"
+            }
+            return "无可用纠错模型"
+        }
+    }
+
+    private func ollamaStatusParameter() -> String {
+        currentMaintenance.ollamaBaseURL.isEmpty ? "-" : currentMaintenance.ollamaBaseURL
+    }
+
+    private func rebuildInputOptions() {
+        removeAllArrangedSubviews(from: inputCardsStack)
+
         let configured = currentConfig["input_device"] as? String
         let defaultName = currentInputDevices.first(where: { $0.isDefault })?.name
         let defaultTitle: String
@@ -1848,106 +2678,427 @@ final class CodexVoicePanelController: NSViewController {
         } else {
             defaultTitle = "系统默认输入"
         }
-        stack.addArrangedSubview(choiceButton(
+        inputCardsStack.addArrangedSubview(cardButton(
+            source: "默认",
             title: defaultTitle,
+            parameter: "自动",
+            architecture: "CoreAudio",
+            vendor: "macOS",
             value: "__default__",
             selected: configured == nil || configured?.isEmpty == true,
-            action: #selector(inputChoiceClicked(_:))
+            action: #selector(inputChoiceClicked(_:)),
+            width: Metrics.inputCardWidth
         ))
 
         if currentInputDevices.isEmpty {
-            stack.addArrangedSubview(secondaryText(scanningModels ? "正在扫描输入设备..." : "未检测到可用麦克风"))
+            let title = scanningModels ? "正在扫描输入设备" : "未检测到可用麦克风"
+            inputCardsStack.addArrangedSubview(statusCard(
+                "输入",
+                title,
+                "参数：-",
+                "架构：CoreAudio",
+                "厂家：macOS",
+                width: Metrics.inputCardWidth
+            ))
         } else {
             for device in currentInputDevices {
                 let title = device.isDefault ? "\(device.name)（当前系统默认）" : device.name
-                stack.addArrangedSubview(choiceButton(
+                let channels = device.channels.map { "\($0) ch" } ?? "未知"
+                inputCardsStack.addArrangedSubview(cardButton(
+                    source: "麦克风",
                     title: title,
+                    parameter: channels,
+                    architecture: "CoreAudio 输入",
+                    vendor: device.isDefault ? "macOS 默认" : "音频设备",
                     value: device.name,
                     selected: configured == device.name,
-                    action: #selector(inputChoiceClicked(_:))
+                    action: #selector(inputChoiceClicked(_:)),
+                    width: Metrics.inputCardWidth
                 ))
             }
         }
+    }
 
-        let probeRow = horizontalStack(spacing: 8)
-        let probeButton = NSButton(
-            title: inputProbeInFlight ? "测试中" : "测试输入",
-            target: self,
-            action: #selector(probeInputClicked(_:))
-        )
-        probeButton.bezelStyle = .rounded
+    private func refreshInputProbeArea() {
+        probeButton.title = inputProbeInFlight ? "测试中" : "测试输入"
         probeButton.isEnabled = !inputProbeInFlight
-        probeRow.addArrangedSubview(probeButton)
-        let probeLabel = secondaryText(currentInputProbeResult)
-        probeLabel.lineBreakMode = .byTruncatingMiddle
-        probeRow.addArrangedSubview(probeLabel)
-        stack.addArrangedSubview(probeRow)
+        setText(probeResultLabel, currentInputProbeResult)
 
-        let maxRow = horizontalStack(spacing: 8)
+        let minutes = currentMaxRecordingMinutes()
+        setText(maxMinutesLabel, "录音上限：\(Int(minutes)) 分钟")
+        if maxMinutesStepper.doubleValue != minutes {
+            maxMinutesStepper.doubleValue = minutes
+        }
+
+        if inputTestActive && !inputProbeInFlight && currentStatus.status == "idle" {
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.inputTestActive,
+                      !self.inputProbeInFlight,
+                      self.currentStatus.status == "idle" else {
+                    return
+                }
+                self.onProbeInput?()
+            }
+        }
+    }
+
+    private func refreshMaxMinutesPopup() {
+        let minutes = currentMaxRecordingMinutes()
+        let index = max(0, min(9, Int(minutes) - 1))
+        if maxMinutesPopup.indexOfSelectedItem != index {
+            maxMinutesPopup.selectItem(at: index)
+        }
+    }
+
+    private func currentMaxRecordingMinutes() -> Double {
         let maxSeconds = configDouble(
             "background_max_record_seconds",
             defaultValue: configDouble("max_record_seconds", defaultValue: 300)
         )
-        let minutes = max(1, min(10, round(maxSeconds / 60)))
-        maxMinutesLabel.stringValue = "录音上限：\(Int(minutes)) 分钟"
-        maxMinutesLabel.font = NSFont.systemFont(ofSize: 12)
-        let stepper = NSStepper()
-        stepper.minValue = 1
-        stepper.maxValue = 10
-        stepper.increment = 1
-        stepper.doubleValue = minutes
-        stepper.target = self
-        stepper.action = #selector(maxMinutesChanged(_:))
-        maxRow.addArrangedSubview(maxMinutesLabel)
-        maxRow.addArrangedSubview(stepper)
-        maxRow.addArrangedSubview(makeFlexibleSpacer())
-        stack.addArrangedSubview(maxRow)
-
-        tabStack.addArrangedSubview(stack)
+        return max(1, min(10, round(maxSeconds / 60)))
     }
 
-    private func buildMaintenanceTab() {
-        let stack = verticalStack(spacing: 7)
-        stack.addArrangedSubview(infoLine("Conda", currentMaintenance.pythonPath))
-        stack.addArrangedSubview(infoLine("LaunchAgent", currentMaintenance.launchAgentStatus))
-        stack.addArrangedSubview(infoLine("Ollama", currentMaintenance.ollamaStatus))
-        if let task = currentModelTask {
-            let detail = task.detail.isEmpty ? task.status : "\(task.status) · \(task.detail)"
-            stack.addArrangedSubview(infoLine("模型任务", "\(task.label) · \(detail)"))
+    private func probeLevelFromResult() -> CGFloat {
+        let pattern = #"RMS\s+([0-9.]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                in: currentInputProbeResult,
+                range: NSRange(currentInputProbeResult.startIndex..., in: currentInputProbeResult)
+              ),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: currentInputProbeResult),
+              let value = Double(currentInputProbeResult[range]) else {
+            return 0.32
+        }
+        return CGFloat(max(0.12, min(1.0, value * 18)))
+    }
+
+    private func refreshCardLoadingOverlays() {
+        let runningTask = currentModelTask?.status == "running" ? currentModelTask : nil
+        updateLoadingOverlay(
+            in: transcriptionCardsStack,
+            task: runningTask?.scope == "transcription" ? runningTask : nil
+        )
+        updateLoadingOverlay(
+            in: correctionCardsStack,
+            task: runningTask?.scope == "correction" ? runningTask : nil
+        )
+        updateLoadingOverlay(in: inputCardsStack, task: nil)
+    }
+
+    private func updateLoadingOverlay(in stack: NSStackView, task: ModelTask?) {
+        for view in stack.arrangedSubviews {
+            guard let card = view as? CardChoiceView else {
+                continue
+            }
+            card.setLoadingTask(card.isSelectedCard ? task : nil)
+        }
+    }
+
+    private func addTabDocument(_ document: NSView, content: NSStackView) {
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(content)
+        tabContainer.addSubview(document)
+        NSLayoutConstraint.activate([
+            document.leadingAnchor.constraint(equalTo: tabContainer.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: tabContainer.trailingAnchor),
+            document.topAnchor.constraint(equalTo: tabContainer.topAnchor),
+            document.bottomAnchor.constraint(equalTo: tabContainer.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            content.topAnchor.constraint(equalTo: document.topAnchor)
+        ])
+    }
+
+    private func showTab(at index: Int, updateSize: Bool = true) {
+        selectedTabIndex = index
+        let documents = [transcriptionDocument, correctionDocument, inputDocument]
+        for (documentIndex, document) in documents.enumerated() {
+            document.isHidden = documentIndex != index
+        }
+        if updateSize {
+            resizeVisibleTab()
+            updatePreferredContentSize()
+        }
+    }
+
+    private func resizeVisibleTab() {
+        let selected: (document: NSView, content: NSStackView)
+        switch selectedTabIndex {
+        case 1:
+            selected = (correctionDocument, correctionContentStack)
+        case 2:
+            selected = (inputDocument, inputContentStack)
+        default:
+            selected = (transcriptionDocument, transcriptionContentStack)
+        }
+
+        let height = resizeDocument(selected.document, content: selected.content)
+        if abs((tabContainerHeightConstraint?.constant ?? 0) - height) > 0.5 {
+            tabContainerHeightConstraint?.constant = height
+        }
+    }
+
+    private func configureContentStack(_ stack: NSStackView) {
+        stack.orientation = .vertical
+        stack.spacing = 6
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.widthAnchor.constraint(equalToConstant: Metrics.tabInnerWidth).isActive = true
+    }
+
+    private func configureCardStack(_ stack: NSStackView) {
+        stack.orientation = .horizontal
+        stack.spacing = Metrics.cardSpacing
+        stack.alignment = .top
+        stack.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private func cardScroller(
+        document: NSView,
+        stack: NSStackView,
+        setHeightConstraint: (NSLayoutConstraint) -> Void
+    ) -> NSView {
+        let scrollView = NSScrollView()
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.horizontalScrollElasticity = .allowed
+        scrollView.verticalScrollElasticity = .none
+        scrollView.contentInsets = NSEdgeInsetsZero
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.widthAnchor.constraint(equalToConstant: Metrics.cardViewportWidth).isActive = true
+        let heightConstraint = scrollView.heightAnchor.constraint(equalToConstant: 1)
+        heightConstraint.isActive = true
+        setHeightConstraint(heightConstraint)
+
+        document.frame = NSRect(x: 0, y: 0, width: Metrics.cardViewportWidth, height: 1)
+        document.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: Metrics.cardScrollerInset),
+            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: Metrics.cardScrollerTopInset),
+            stack.bottomAnchor.constraint(
+                lessThanOrEqualTo: document.bottomAnchor,
+                constant: -Metrics.cardScrollerBottomInset
+            )
+        ])
+        scrollView.documentView = document
+        return scrollView
+    }
+
+    private func cardButton(
+        source: String,
+        title: String,
+        parameter: String,
+        architecture: String,
+        vendor: String,
+        value: String,
+        selected: Bool,
+        action: Selector,
+        enabled: Bool = true,
+        unloadValue: String? = nil,
+        unloadAction: Selector? = nil,
+        width: CGFloat = Metrics.modelCardWidth
+    ) -> NSView {
+        let card = CardChoiceView(
+            source: source,
+            title: title,
+            rows: [
+                ("参数", parameter),
+                ("架构", architecture),
+                ("厂家", vendor)
+            ],
+            selected: selected,
+            enabled: enabled,
+            width: width
+        )
+        card.identifier = NSUserInterfaceItemIdentifier(value)
+        if enabled {
+            card.target = self
+            card.action = action
+        }
+        if let unloadValue, let unloadAction {
+            card.setUnloadAction(value: unloadValue, target: self, action: unloadAction)
+        }
+        return card
+    }
+
+    private func statusCard(
+        _ source: String,
+        _ title: String,
+        _ parameterLine: String,
+        _ architectureLine: String,
+        _ vendorLine: String,
+        width: CGFloat = Metrics.modelCardWidth
+    ) -> NSView {
+        return CardChoiceView(
+            source: source,
+            title: title,
+            rows: [
+                ("参数", parameterLine.replacingOccurrences(of: "参数：", with: "")),
+                ("架构", architectureLine.replacingOccurrences(of: "架构：", with: "")),
+                ("厂家", vendorLine.replacingOccurrences(of: "厂家：", with: ""))
+            ],
+            selected: false,
+            enabled: false,
+            width: width
+        )
+    }
+
+    private func layoutCardGroup(
+        document: NSView,
+        stack: NSStackView,
+        scrollerHeightConstraint: NSLayoutConstraint?
+    ) {
+        let cardHeight = uniformCardHeight(for: stack)
+        let scrollerHeight = ceil(
+            cardHeight
+                + Metrics.cardScrollerTopInset
+                + Metrics.cardScrollerBottomInset
+        )
+        scrollerHeightConstraint?.constant = max(1, scrollerHeight)
+        stack.layoutSubtreeIfNeeded()
+        let width = max(Metrics.tabInnerWidth, stack.fittingSize.width + Metrics.cardScrollerInset * 2)
+        if abs(document.frame.width - width) > 1
+            || abs(document.frame.height - scrollerHeight) > 1 {
+            document.setFrameSize(NSSize(width: width, height: max(1, scrollerHeight)))
+        }
+    }
+
+    private func uniformCardHeight(for stack: NSStackView) -> CGFloat {
+        let cards = stack.arrangedSubviews.compactMap { $0 as? CardChoiceView }
+        let height = cards.map { $0.naturalHeight() }.max() ?? 1
+        let uniformHeight = max(1, ceil(height))
+        for card in cards {
+            card.applyUniformHeight(uniformHeight)
+        }
+        return uniformHeight
+    }
+
+    private func parameterText(for model: OllamaModel) -> String {
+        if !model.parameterSize.isEmpty {
+            return model.parameterSize
+        }
+        return "未知"
+    }
+
+    private func architectureText(for model: OllamaModel) -> String {
+        let base: String
+        if !model.family.isEmpty {
+            base = model.family
+        } else if let first = model.families.first, !first.isEmpty {
+            base = first
         } else {
-            stack.addArrangedSubview(infoLine("模型任务", "空闲"))
+            base = inferredArchitecture(from: model.name)
         }
-        stack.addArrangedSubview(secondaryText("当前只有一个 LaunchAgent：com.codexvoice.agent"))
-        stack.addArrangedSubview(actionRow([
-            ("打开日志", #selector(logClicked(_:))),
-            ("打开转录记录", #selector(transcriptsClicked(_:))),
-            ("打开配置", #selector(configClicked(_:)))
-        ]))
-        stack.addArrangedSubview(actionRow([
-            ("退出 Agent", #selector(quitClicked(_:)))
-        ]))
-        tabStack.addArrangedSubview(stack)
+        if model.quantization.isEmpty {
+            return base
+        }
+        return "\(base) · \(model.quantization)"
     }
 
-    private func columns(_ stacks: [NSStackView]) -> NSView {
-        let row = horizontalStack(spacing: 10)
-        row.distribution = .fillEqually
-        for stack in stacks {
-            row.addArrangedSubview(stack)
-        }
+    private func vendorText(for model: OllamaModel) -> String {
+        let text = ([model.name, model.family] + model.families).joined(separator: " ").lowercased()
+        if text.contains("qwen") { return "Alibaba / Qwen" }
+        if text.contains("gemma") { return "Google" }
+        if text.contains("llama") { return "Meta" }
+        if text.contains("mistral") { return "Mistral AI" }
+        if text.contains("deepseek") { return "DeepSeek" }
+        if text.contains("phi") { return "Microsoft" }
+        if text.contains("whisper") { return "OpenAI / 社区" }
+        if text.contains("yi") { return "01.AI" }
+        if text.contains("baichuan") { return "Baichuan" }
+        return "Ollama"
+    }
+
+    private func inferredArchitecture(from name: String) -> String {
+        let lower = name.lowercased()
+        if lower.contains("qwen") { return "Qwen" }
+        if lower.contains("gemma") { return "Gemma" }
+        if lower.contains("llama") { return "Llama" }
+        if lower.contains("mistral") { return "Mistral" }
+        if lower.contains("deepseek") { return "DeepSeek" }
+        if lower.contains("whisper") { return "Whisper" }
+        if lower.contains("asr") || lower.contains("speech") { return "Audio" }
+        return "LLM"
+    }
+
+    private func makeProbeRow() -> NSView {
+        let row = horizontalStack(spacing: 8)
+        row.widthAnchor.constraint(equalToConstant: Metrics.tabInnerWidth).isActive = true
+        probeButton.target = self
+        probeButton.action = #selector(probeInputClicked(_:))
+        probeButton.bezelStyle = .rounded
+        probeButton.controlSize = .small
+        probeButton.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        probeResultLabel.font = NSFont.systemFont(ofSize: 11)
+        probeResultLabel.textColor = .secondaryLabelColor
+        probeResultLabel.lineBreakMode = .byTruncatingMiddle
+        probeResultLabel.widthAnchor.constraint(
+            equalToConstant: Metrics.tabInnerWidth - 78 - 8
+        ).isActive = true
+        row.addArrangedSubview(probeButton)
+        row.addArrangedSubview(probeResultLabel)
         return row
     }
 
-    private func columnStack(title: String) -> NSStackView {
-        let stack = verticalStack(spacing: 6)
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        stack.addArrangedSubview(label)
-        return stack
+    private func makeMaxRecordingRow() -> NSView {
+        let row = horizontalStack(spacing: 8)
+        row.widthAnchor.constraint(equalToConstant: Metrics.tabInnerWidth).isActive = true
+        maxMinutesLabel.font = NSFont.systemFont(ofSize: 12)
+        maxMinutesLabel.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        maxMinutesStepper.minValue = 1
+        maxMinutesStepper.maxValue = 10
+        maxMinutesStepper.increment = 1
+        maxMinutesStepper.target = self
+        maxMinutesStepper.action = #selector(maxMinutesChanged(_:))
+        row.addArrangedSubview(maxMinutesLabel)
+        row.addArrangedSubview(maxMinutesStepper)
+        row.addArrangedSubview(makeFlexibleSpacer())
+        return row
+    }
+
+    private func routeRow(_ name: String, _ valueLabel: NSTextField) -> NSView {
+        let row = horizontalStack(spacing: 3)
+        row.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+        let nameLabel = NSTextField(labelWithString: "\(name)：")
+        nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        nameLabel.textColor = .secondaryLabelColor
+        nameLabel.setContentHuggingPriority(.required, for: .horizontal)
+        nameLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        valueLabel.font = NSFont.systemFont(ofSize: 12)
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        valueLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Metrics.contentWidth - 80).isActive = true
+        row.addArrangedSubview(nameLabel)
+        row.addArrangedSubview(valueLabel)
+        return row
+    }
+
+    private func infoLine(_ name: String, _ valueLabel: NSTextField) -> NSView {
+        let row = horizontalStack(spacing: 8)
+        row.widthAnchor.constraint(equalToConstant: Metrics.tabInnerWidth).isActive = true
+        let nameLabel = NSTextField(labelWithString: "\(name)：")
+        nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        nameLabel.widthAnchor.constraint(equalToConstant: Metrics.maintenanceLabelWidth).isActive = true
+        valueLabel.font = NSFont.systemFont(ofSize: 11)
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        valueLabel.widthAnchor.constraint(
+            equalToConstant: Metrics.tabInnerWidth - Metrics.maintenanceLabelWidth - 8
+        ).isActive = true
+        row.addArrangedSubview(nameLabel)
+        row.addArrangedSubview(valueLabel)
+        return row
     }
 
     private func actionRow(_ items: [(String, Selector)]) -> NSView {
         let row = horizontalStack(spacing: 8)
+        row.widthAnchor.constraint(equalToConstant: Metrics.tabInnerWidth).isActive = true
         for item in items {
             let button = NSButton(title: item.0, target: self, action: item.1)
             button.bezelStyle = .rounded
@@ -1958,43 +3109,50 @@ final class CodexVoicePanelController: NSViewController {
         return row
     }
 
-    private func choiceButton(
-        title: String,
-        value: String,
-        selected: Bool,
-        action: Selector
-    ) -> NSButton {
-        let button = NSButton(radioButtonWithTitle: title, target: self, action: action)
-        button.identifier = NSUserInterfaceItemIdentifier(value)
-        button.state = selected ? .on : .off
-        button.toolTip = title
-        button.font = NSFont.systemFont(ofSize: 11)
-        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        if let cell = button.cell as? NSButtonCell {
-            cell.lineBreakMode = .byTruncatingMiddle
-        }
-        return button
-    }
-
-    private func disabledButton(_ title: String) -> NSButton {
-        let button = NSButton(title: title, target: nil, action: nil)
-        button.isEnabled = false
+    private func compactButton(_ title: String, _ action: Selector, width: CGFloat) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = NSFont.systemFont(ofSize: 11)
+        button.widthAnchor.constraint(equalToConstant: width).isActive = true
         return button
     }
 
-    private func infoLine(_ name: String, _ value: String) -> NSView {
-        let row = horizontalStack(spacing: 8)
-        let nameLabel = NSTextField(labelWithString: "\(name)：")
-        nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        nameLabel.widthAnchor.constraint(equalToConstant: 82).isActive = true
-        let valueLabel = secondaryText(value)
-        valueLabel.lineBreakMode = .byTruncatingMiddle
-        row.addArrangedSubview(nameLabel)
-        row.addArrangedSubview(valueLabel)
-        return row
+    private func configureIndicatorButton() {
+        indicatorButton.target = self
+        indicatorButton.action = #selector(indicatorClicked(_:))
+        indicatorButton.bezelStyle = .rounded
+        indicatorButton.controlSize = .small
+        indicatorButton.imagePosition = .imageOnly
+        indicatorButton.toolTip = "显示或隐藏录音浮窗"
+        if #available(macOS 11.0, *) {
+            indicatorButton.image = NSImage(
+                systemSymbolName: "macwindow",
+                accessibilityDescription: "浮窗"
+            ) ?? NSImage(
+                systemSymbolName: "rectangle",
+                accessibilityDescription: "浮窗"
+            )
+        } else {
+            indicatorButton.title = "□"
+            indicatorButton.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        }
+        indicatorButton.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        indicatorButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        indicatorButton.wantsLayer = true
+        indicatorButton.layer?.cornerRadius = 6
+        setIndicatorButtonStyle(enabled: configBool("recording_indicator", defaultValue: true))
+    }
+
+    private func setIndicatorButtonStyle(enabled: Bool) {
+        indicatorButton.contentTintColor = enabled ? .systemGreen : .labelColor
+        indicatorButton.layer?.backgroundColor = enabled
+            ? NSColor.systemGreen.withAlphaComponent(0.16).usingColorSpace(.deviceRGB)?.cgColor
+            : NSColor.clear.cgColor
+        indicatorButton.layer?.borderWidth = enabled ? 1 : 0
+        indicatorButton.layer?.borderColor = enabled
+            ? NSColor.systemGreen.withAlphaComponent(0.55).usingColorSpace(.deviceRGB)?.cgColor
+            : NSColor.clear.cgColor
     }
 
     private func secondaryText(_ text: String) -> NSTextField {
@@ -2002,7 +3160,7 @@ final class CodexVoicePanelController: NSViewController {
         label.font = NSFont.systemFont(ofSize: 11)
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.widthAnchor.constraint(lessThanOrEqualToConstant: Metrics.tabInnerWidth).isActive = true
         return label
     }
 
@@ -2024,6 +3182,16 @@ final class CodexVoicePanelController: NSViewController {
         return stack
     }
 
+    private func separator(width: CGFloat = Metrics.contentWidth) -> NSView {
+        let line = NSBox()
+        line.boxType = .separator
+        line.widthAnchor.constraint(equalToConstant: width).isActive = true
+        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        line.setContentHuggingPriority(.required, for: .vertical)
+        line.setContentCompressionResistancePriority(.required, for: .vertical)
+        return line
+    }
+
     private func makeFlexibleSpacer() -> NSView {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -2031,32 +3199,70 @@ final class CodexVoicePanelController: NSViewController {
         return spacer
     }
 
+    private func updatePreferredContentSize() {
+        guard isViewLoaded, let rootStack else {
+            return
+        }
+
+        view.layoutSubtreeIfNeeded()
+        rootStack.layoutSubtreeIfNeeded()
+        let fittingHeight = max(1, ceil(rootStack.fittingSize.height))
+        let nextSize = NSSize(width: Metrics.panelWidth, height: fittingHeight)
+        guard abs(preferredContentSize.width - nextSize.width) > 0.5
+            || abs(preferredContentSize.height - nextSize.height) > 0.5 else {
+            return
+        }
+
+        preferredContentSize = nextSize
+        view.setFrameSize(nextSize)
+        onPreferredContentSizeChange?(nextSize)
+    }
+
+    @discardableResult
+    private func resizeDocument(_ document: NSView, content: NSStackView) -> CGFloat {
+        content.layoutSubtreeIfNeeded()
+        let height = max(1, ceil(content.fittingSize.height))
+        if abs(document.frame.height - height) > 1 {
+            document.setFrameSize(NSSize(width: Metrics.tabDocumentWidth, height: height))
+        }
+        return height
+    }
+
+    private func removeAllArrangedSubviews(from stack: NSStackView) {
+        for view in stack.arrangedSubviews {
+            stack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+    }
+
+    private func setText(_ label: NSTextField, _ text: String) {
+        if label.stringValue != text {
+            label.stringValue = text
+        }
+    }
+
     private func setProgress(value: Double?, indeterminate: Bool) {
+        modelProgress.isHidden = false
         if indeterminate {
-            modelProgress.isIndeterminate = true
+            if !modelProgress.isIndeterminate {
+                modelProgress.isIndeterminate = true
+            }
             modelProgress.startAnimation(nil)
             return
         }
         modelProgress.stopAnimation(nil)
-        modelProgress.isIndeterminate = false
-        if let value {
-            modelProgress.doubleValue = max(0, min(1, value))
-        } else {
-            modelProgress.doubleValue = 0
+        if modelProgress.isIndeterminate {
+            modelProgress.isIndeterminate = false
         }
+        modelProgress.doubleValue = max(0, min(1, value ?? 0))
     }
 
     private func durationText() -> String {
-        let maxSeconds = configDouble(
-            "background_max_record_seconds",
-            defaultValue: configDouble("max_record_seconds", defaultValue: 300)
-        )
-        let maxText = formatDuration(maxSeconds)
         if currentStatus.status == "recording" || currentStatus.status == "submitting" {
             let elapsed = elapsedSeconds(from: currentStatus.updatedAt)
-            return "录音：\(formatDuration(elapsed)) / \(maxText)"
+            return "\(formatDuration(elapsed)) /"
         }
-        return "上限：\(maxText)"
+        return "0:00 /"
     }
 
     private func elapsedSeconds(from text: String) -> Double {
@@ -2088,7 +3294,7 @@ final class CodexVoicePanelController: NSViewController {
 
     private func colorForStatus(_ status: String, stale: Bool) -> NSColor {
         if stale {
-            return .black
+            return .white
         }
         switch status {
         case "recording":
@@ -2098,7 +3304,7 @@ final class CodexVoicePanelController: NSViewController {
         case "error":
             return .systemRed
         default:
-            return .black
+            return .white
         }
     }
 
@@ -2197,8 +3403,20 @@ final class CodexVoicePanelController: NSViewController {
     }
 
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
-        selectedTab = sender.selectedSegment
-        rebuildCurrentTab()
+        let index = max(0, min(sender.selectedSegment, 2))
+        showTab(at: index)
+    }
+
+    @objc private func statusDotClicked(_ sender: Any?) {
+        guard currentStatus.status == "idle" else {
+            return
+        }
+        inputTestActive.toggle()
+        if inputTestActive {
+            onProbeInput?()
+        }
+        refreshStatusArea()
+        refreshInputProbeArea()
     }
 
     @objc private func startClicked(_ sender: Any?) {
@@ -2217,21 +3435,21 @@ final class CodexVoicePanelController: NSViewController {
         onToggleIndicator?()
     }
 
-    @objc private func transcriptionChoiceClicked(_ sender: NSButton) {
+    @objc private func transcriptionChoiceClicked(_ sender: NSControl) {
         guard let value = sender.identifier?.rawValue else {
             return
         }
         onSelectTranscriptionModel?(value)
     }
 
-    @objc private func correctionChoiceClicked(_ sender: NSButton) {
+    @objc private func correctionChoiceClicked(_ sender: NSControl) {
         guard let value = sender.identifier?.rawValue else {
             return
         }
         onSelectCorrectionModel?(value)
     }
 
-    @objc private func inputChoiceClicked(_ sender: NSButton) {
+    @objc private func inputChoiceClicked(_ sender: NSControl) {
         guard let value = sender.identifier?.rawValue else {
             return
         }
@@ -2250,13 +3468,25 @@ final class CodexVoicePanelController: NSViewController {
         onUnloadCorrectionModel?()
     }
 
+    @objc private func unloadOllamaModelClicked(_ sender: NSControl) {
+        guard let model = sender.identifier?.rawValue, !model.isEmpty else {
+            return
+        }
+        onUnloadOllamaModel?(model)
+    }
+
     @objc private func probeInputClicked(_ sender: Any?) {
         onProbeInput?()
     }
 
     @objc private func maxMinutesChanged(_ sender: NSStepper) {
-        maxMinutesLabel.stringValue = "录音上限：\(Int(sender.doubleValue)) 分钟"
+        setText(maxMinutesLabel, "录音上限：\(Int(sender.doubleValue)) 分钟")
         onSetMaxMinutes?(sender.doubleValue)
+    }
+
+    @objc private func maxMinutesPopupChanged(_ sender: NSPopUpButton) {
+        let minutes = Double(max(1, sender.indexOfSelectedItem + 1))
+        onSetMaxMinutes?(minutes)
     }
 
     @objc private func microphoneClicked(_ sender: Any?) {
