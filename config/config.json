@@ -3,10 +3,7 @@
   "background_manual_submit_required" : true,
   "background_max_record_seconds" : 600,
   "channels" : 1,
-  "clipboard_fallback_app_allowlist" : [
-    "Codex",
-    "OpenCode"
-  ],
+  "config_version" : 2,
   "correction_backend" : "ollama",
   "correction_profile" : "ollama-correction",
   "external_api_enabled" : false,
@@ -21,6 +18,14 @@
   "min_audio_rms" : 0.0047999999999999996,
   "min_record_seconds" : 0.59999999999999998,
   "mode" : "normal",
+  "native_hotkey" : {
+    "key" : "space",
+    "key_code" : 49,
+    "modifiers" : [
+      "option"
+    ]
+  },
+  "native_hotkey_enabled" : true,
   "notify_status" : false,
   "ollama_base_url" : "http:\/\/127.0.0.1:11434",
   "ollama_clean_context_per_request" : true,
@@ -52,7 +57,7 @@
   "recording_indicator" : true,
   "reject_repeated_hallucinations" : true,
   "sample_rate" : 16000,
-  "save_recordings" : true,
+  "save_recordings" : false,
   "save_transcripts" : true,
   "setup_profile" : "custom",
   "silence_seconds" : 1.8,

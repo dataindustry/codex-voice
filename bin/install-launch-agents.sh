@@ -7,16 +7,18 @@ UID_VALUE="$(id -u)"
 
 AGENT_LABEL="com.codexvoice.agent"
 AGENT_PLIST="$AGENT_DIR/$AGENT_LABEL.plist"
-AGENT_SOURCE="$ROOT/bin/codex-voice-agent.swift"
+AGENT_SOURCE_DIR="$ROOT/Sources/Agent"
 AGENT_APP="$ROOT/Codex Voice Agent.app"
 AGENT_CONTENTS="$AGENT_APP/Contents"
+AGENT_INFO_PLIST="$AGENT_CONTENTS/Info.plist"
 AGENT_MACOS="$AGENT_CONTENTS/MacOS"
 AGENT_BINARY="$AGENT_MACOS/CodexVoiceAgent"
 INDICATOR_SOURCE="$ROOT/bin/codex-voice-recording-indicator.swift"
 INDICATOR_BINARY="$ROOT/bin/codex-voice-recording-indicator"
 CONDA_ENV_NAME="${CODEX_VOICE_CONDA_ENV:-codex-voice}"
+AGENT_RESIGNED=0
 
-mkdir -p "$AGENT_DIR" "$ROOT/logs" "$ROOT/state/triggers"
+mkdir -p "$AGENT_DIR" "$ROOT/logs" "$ROOT/state"
 
 find_conda() {
   if [[ -n "${CONDA_EXE:-}" && -x "$CONDA_EXE" ]]; then
@@ -56,8 +58,8 @@ resolve_python() {
 }
 
 compile_agent() {
-  if [[ ! -f "$AGENT_SOURCE" ]]; then
-    echo "Codex Voice agent source is missing: $AGENT_SOURCE" >&2
+  if [[ ! -d "$AGENT_SOURCE_DIR" ]]; then
+    echo "Codex Voice agent source directory is missing: $AGENT_SOURCE_DIR" >&2
     return 1
   fi
   if ! command -v swiftc >/dev/null 2>&1; then
@@ -65,7 +67,9 @@ compile_agent() {
     return 1
   fi
   mkdir -p "$AGENT_MACOS"
-  cat >"$AGENT_CONTENTS/Info.plist" <<PLIST
+  local info_plist_changed=0
+  local info_plist_temp="$ROOT/state/codex-voice-agent-info.$$.plist"
+  cat >"$info_plist_temp" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -94,11 +98,56 @@ compile_agent() {
 </dict>
 </plist>
 PLIST
-  if [[ ! -x "$AGENT_BINARY" || "$AGENT_SOURCE" -nt "$AGENT_BINARY" ]]; then
-    swiftc "$AGENT_SOURCE" -o "$AGENT_BINARY" -framework Cocoa -framework AVFoundation
+  if [[ ! -f "$AGENT_INFO_PLIST" ]] || ! cmp -s "$info_plist_temp" "$AGENT_INFO_PLIST"; then
+    mv "$info_plist_temp" "$AGENT_INFO_PLIST"
+    info_plist_changed=1
+  else
+    rm -f "$info_plist_temp"
+  fi
+  local sources=("$AGENT_SOURCE_DIR"/*.swift)
+  if [[ ! -e "${sources[0]}" ]]; then
+    echo "Codex Voice agent source files are missing: $AGENT_SOURCE_DIR/*.swift" >&2
+    return 1
+  fi
+  local should_compile=0
+  if [[ ! -x "$AGENT_BINARY" ]]; then
+    should_compile=1
+  else
+    for source in "${sources[@]}"; do
+      if [[ "$source" -nt "$AGENT_BINARY" ]]; then
+        should_compile=1
+        break
+      fi
+    done
+  fi
+  if [[ "$should_compile" -eq 1 ]]; then
+    swiftc "${sources[@]}" -o "$AGENT_BINARY" -framework Cocoa -framework AVFoundation -framework Carbon
     chmod +x "$AGENT_BINARY"
   fi
-  codesign --force --sign - --identifier "$AGENT_LABEL" "$AGENT_APP" >/dev/null
+  if [[ "$should_compile" -eq 1 || "$info_plist_changed" -eq 1 ]]; then
+    codesign --force --sign - --identifier "$AGENT_LABEL" "$AGENT_APP" >/dev/null
+    AGENT_RESIGNED=1
+  elif ! codesign --verify "$AGENT_APP" >/dev/null 2>&1; then
+    codesign --force --sign - --identifier "$AGENT_LABEL" "$AGENT_APP" >/dev/null
+    AGENT_RESIGNED=1
+  fi
+}
+
+reset_accessibility_permission_if_needed() {
+  if [[ "$AGENT_RESIGNED" -ne 1 ]]; then
+    return
+  fi
+
+  echo "Codex Voice Agent was rebuilt or re-signed."
+  if tccutil reset Accessibility "$AGENT_LABEL" >/dev/null 2>&1; then
+    echo "Reset Accessibility permission for $AGENT_LABEL."
+  else
+    echo "Could not reset Accessibility permission for $AGENT_LABEL; you may need to remove the old entry manually." >&2
+  fi
+
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" >/dev/null 2>&1 || {
+    echo "Open System Settings -> Privacy & Security -> Accessibility and re-enable Codex Voice Agent." >&2
+  }
 }
 
 compile_recording_indicator() {
@@ -119,6 +168,7 @@ compile_recording_indicator() {
 PYTHON_BIN="$(resolve_python)"
 compile_agent
 compile_recording_indicator
+reset_accessibility_permission_if_needed
 
 cat >"$AGENT_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

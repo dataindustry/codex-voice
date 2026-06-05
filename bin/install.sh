@@ -38,12 +38,10 @@ ensure_layout() {
   mkdir -p \
     "$ROOT/bin" \
     "$ROOT/config" \
-    "$ROOT/raycast" \
     "$ROOT/recordings" \
     "$ROOT/transcripts" \
     "$ROOT/logs" \
-    "$ROOT/state" \
-    "$ROOT/state/triggers"
+    "$ROOT/state"
 }
 
 ensure_required_files() {
@@ -53,15 +51,11 @@ ensure_required_files() {
     "$ROOT/config/config.json" \
     "$ROOT/config/terms.json" \
     "$ROOT/config/correction_prompt.txt" \
-    "$ROOT/raycast/codex-voice.sh" \
-    "$ROOT/raycast/codex-voice-copy-only.sh" \
-    "$ROOT/raycast/codex-voice-strict.sh" \
     "$ROOT/bin/install-launch-agents.sh" \
-    "$ROOT/bin/codex-voice-trigger.sh" \
     "$ROOT/bin/codex-voice-config.py" \
-    "$ROOT/bin/codex-voice-agent.swift" \
+    "$ROOT/Sources/Agent/main.swift" \
+    "$ROOT/pyproject.toml" \
     "$ROOT/bin/codex-voice-recording-indicator.swift" \
-    "$ROOT/raycast/codex-voice-config.sh" \
     "$ROOT/environment.yml" \
     "$ROOT/requirements.txt"; do
     if [[ ! -f "$file" ]]; then
@@ -141,15 +135,6 @@ check_ollama() {
   fi
 }
 
-check_raycast() {
-  if [[ -d "/Applications/Raycast.app" || -d "$HOME/Applications/Raycast.app" ]]; then
-    log "Raycast app found."
-  else
-    warn "Raycast.app was not found in /Applications or ~/Applications."
-    warn "Install Raycast, then add this Script Commands directory: $ROOT/raycast"
-  fi
-}
-
 install_conda_deps() {
   if [[ "$SKIP_DEPS" -eq 1 ]]; then
     warn "Skipping Conda environment install/update because --skip-deps was provided."
@@ -168,21 +153,21 @@ install_conda_deps() {
   python_bin="$(conda_python "$conda_bin")"
   log "Codex Voice Conda Python: $python_bin"
   PYTHONNOUSERSITE=1 "$python_bin" -m pip install --upgrade pip wheel "setuptools<82"
-  PYTHONNOUSERSITE=1 "$python_bin" -m pip install -r "$ROOT/requirements.txt"
+  PYTHONNOUSERSITE=1 "$python_bin" -m pip install -e "$ROOT[dev]"
 }
 
 set_permissions() {
   chmod +x "$ROOT/bin/codex-voice.py"
   chmod +x "$ROOT/bin/install.sh"
   chmod +x "$ROOT/bin/install-launch-agents.sh"
-  chmod +x "$ROOT/bin/codex-voice-trigger.sh"
   chmod +x "$ROOT/bin/codex-voice-config.py"
   [[ ! -f "$ROOT/Codex Voice Agent.app/Contents/MacOS/CodexVoiceAgent" ]] || chmod +x "$ROOT/Codex Voice Agent.app/Contents/MacOS/CodexVoiceAgent"
   [[ ! -f "$ROOT/bin/codex-voice-recording-indicator" ]] || chmod +x "$ROOT/bin/codex-voice-recording-indicator"
-  chmod +x "$ROOT/raycast/codex-voice.sh"
-  chmod +x "$ROOT/raycast/codex-voice-copy-only.sh"
-  chmod +x "$ROOT/raycast/codex-voice-strict.sh"
-  chmod +x "$ROOT/raycast/codex-voice-config.sh"
+}
+
+cleanup_legacy_artifacts() {
+  rm -f "$ROOT/bin/codex-voice-trigger.sh"
+  rm -rf "$ROOT/raycast" "$ROOT/state/triggers"
 }
 
 main() {
@@ -191,7 +176,6 @@ main() {
   ensure_required_files
   check_homebrew_tools
   check_ollama
-  check_raycast
 
   local conda_bin
   conda_bin="$(find_conda)" || die "Conda not found. Install Anaconda/Miniconda/Miniforge or set CONDA_EXE."
@@ -199,11 +183,12 @@ main() {
 
   install_conda_deps "$conda_bin"
   set_permissions
+  cleanup_legacy_artifacts
   CODEX_VOICE_CONDA_ENV="$CONDA_ENV_NAME" "$ROOT/bin/install-launch-agents.sh"
 
   log "Install steps completed."
-  log "Next: add $ROOT/raycast as a Raycast Script Commands directory."
-  log "Then bind a hotkey for 'Codex Voice Input', for example Option+Space."
+  log "Next: open the menu bar panel to grant permissions or record a different native hotkey."
+  log "Default native hotkey: Option+Space."
   log "macOS may ask for Microphone permission and Accessibility permission."
 }
 

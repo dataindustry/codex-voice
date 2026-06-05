@@ -1,447 +1,403 @@
 # Codex Voice Input
 
-Codex Voice Input 是一个本地 macOS 语音输入层：通过 Raycast 全局快捷键录音，把中文夹杂 IT 英文术语的口述内容转成文本，经过术语纠错后复制到剪贴板，并可自动粘贴到 Codex Desktop、OpenCode、Cursor、VS Code、浏览器输入框等当前前台输入位置。
+Codex Voice Input is a local-first macOS voice input tool. Press the built-in global hotkey once to start recording, press it again to submit. Codex Voice transcribes Chinese speech mixed with English IT terminology, applies local term rules and Ollama correction, copies the result to the clipboard, and auto-pastes only when the current focus is confirmed to be an editable text field.
 
-它不会修改 Codex Desktop，也不会改系统代理。所有文件默认放在 `~/CodexVoice`。
+Languages: English | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [日本語](README.ja.md)
 
-## 架构
+## Who It Is For
+
+- People who often dictate Chinese text mixed with English technical terms in Codex Desktop, Cursor, VS Code, browsers, chat tools, or any text field.
+- People who want transcription and terminology correction to run primarily on the local machine.
+- People who want a fast global hotkey handled directly by the resident menu bar Agent.
+
+## Highlights
+
+- Built-in global hotkey: default `Option + Space`; record a different combination from the menu bar panel.
+- macOS menu bar panel: recording controls, permissions, models, input devices, logs, and model management in one popover.
+- Local transcription: defaults to Apple Silicon-friendly `mlx-whisper` large-v3-turbo with a `faster-whisper` fallback.
+- Local correction: defaults to Ollama `qwen3.6:35b-a3b` for conservative correction of Chinese recognition errors, technical terms, and formatting.
+- Unified paste behavior: always writes final text to the clipboard first; sends `Cmd+V` only when the focused element is editable.
+- Model management: can start Ollama, load the configured qwen model, keep it alive, and unload loaded models from the UI.
+
+## How It Works
 
 ```text
-Raycast Script Command
-        |
-        v
-~/CodexVoice/bin/codex-voice-trigger.sh
-        |
-        v
-~/CodexVoice/state/triggers/*
+Built-in global hotkey
         |
         v
 com.codexvoice.agent LaunchAgent
         |
-        v
-~/CodexVoice/bin/codex-voice.py --toggle
-        |
-        +-- sounddevice 录音 + RMS 静音检测
-        |      Raycast 后台模式默认等第二次触发提交录音
-        |
-        +-- mlx-whisper 转录
-        |      fallback: faster-whisper
-        |
-        +-- terms.json 规则替换
-        |
-        +-- Ollama 本地 LLM 纠错
-        |      fallback: 规则替换文本
-        |
-        +-- pbcopy 写入剪贴板
-        |
-        +-- Codex Voice Agent 原生模拟 Cmd+V
-
-同一个 Codex Voice Agent 也会读取 ~/CodexVoice/state/status.json，
-在 macOS 状态栏显示：黑色空闲、绿色录音、黄色识别/纠错。
+        +-- recording, submit, cancel, menu bar UI
+        +-- Whisper transcription
+        +-- deterministic term replacement from terms.json
+        +-- Ollama local LLM correction
+        +-- pbcopy to clipboard
+        +-- Cmd+V only when the current focus is editable
 ```
 
-## 安装
+## Requirements
 
-先确认文件已经在 `~/CodexVoice`，然后运行：
+- macOS 13 or newer.
+- Apple Silicon Mac recommended. Intel Macs can work, but local transcription may be much slower.
+- Conda, Miniconda, Miniforge, or Anaconda.
+- Homebrew with `ffmpeg` and `portaudio` recommended.
+- Ollama is optional but strongly recommended for local LLM correction.
+
+## Installation
+
+The recommended setup is to place the repository at the default runtime path:
 
 ```bash
+git clone https://github.com/dataindustry/codex-voice.git ~/CodexVoice
+cd ~/CodexVoice
 bash ~/CodexVoice/bin/install.sh
 ```
 
-安装脚本会：
-
-- 创建 `bin/`、`config/`、`raycast/`、`recordings/`、`transcripts/`、`logs/`、`state/`。
-- 检查 Homebrew、`ffmpeg`、`portaudio`、Ollama、Raycast。
-- 创建或更新 Conda 环境 `codex-voice`。
-- 安装 `environment.yml` 和 `requirements.txt` 里的依赖。
-- 设置主程序和 Raycast 脚本的可执行权限。
-- 编译并启动唯一的 `com.codexvoice.agent` LaunchAgent，负责状态栏、Raycast 触发、录音提交和取消入口。
-- 编译原生 Swift 录音浮窗；浮窗不会在 Dock 里显示 `Python 3.12`。
-
-当前安装位置：
-
-```text
-~/CodexVoice
-```
-
-当前默认 Python 环境：
-
-```text
-~/anaconda3/envs/codex-voice
-```
-
-如果你想手动管理 Conda 环境，也可以直接运行：
+If you already cloned it elsewhere, sync it to the default runtime path first:
 
 ```bash
-conda env create -f ~/CodexVoice/environment.yml
-conda run -n codex-voice python -m pip install -r ~/CodexVoice/requirements.txt
+mkdir -p ~/CodexVoice
+rsync -a --exclude .git /path/to/codex-voice/ ~/CodexVoice/
+bash ~/CodexVoice/bin/install.sh
 ```
 
-Docker 不作为默认方案，因为这个工具需要访问 macOS 麦克风、Raycast、AppleScript 粘贴和桌面浮窗，容器里会失去这些用户会话权限。
+The installer will:
 
-如果 `ffmpeg` 或 `portaudio` 缺失：
+- Create `bin/`, `config/`, `recordings/`, `transcripts/`, `logs/`, and `state/`.
+- Check Homebrew, `ffmpeg`, `portaudio`, and Ollama.
+- Create or update the `codex-voice` Conda environment.
+- Install Codex Voice as an editable Python package from `pyproject.toml`, including test and lint tools.
+- Mark the main program and install scripts executable.
+- Compile and start the `com.codexvoice.agent` LaunchAgent.
+- Compile the native Swift recording indicator and menu bar Agent.
 
-```bash
-brew install ffmpeg portaudio
-```
-
-如果只想检查脚本和权限，不安装 Python 依赖：
+To rebuild the Agent without reinstalling Python dependencies:
 
 ```bash
 bash ~/CodexVoice/bin/install.sh --skip-deps
 ```
 
-## Raycast 配置
-
-1. 打开 Raycast 设置。
-2. 找到 Extensions -> Script Commands。
-3. 添加目录：`~/CodexVoice/raycast`。
-4. 你会看到四个命令：
-   - `Codex Voice Input`
-   - `Codex Voice Copy Only`
-   - `Codex Voice Strict`
-   - `Codex Voice Config`
-5. 给 `Codex Voice Input` 绑定全局快捷键，例如 `Option + Space`。
-
-如果 Raycast 找不到脚本，先确认：
-
-```bash
-ls -l ~/CodexVoice/raycast
-```
-
-这些 `.sh` 文件都应该有可执行权限。
-
-Codex Voice Agent 状态：
+Check whether the Agent is running:
 
 ```bash
 launchctl print gui/$(id -u)/com.codexvoice.agent
 ```
 
-## Ollama 配置
+## AI Agent Installation Playbook
 
-当前默认复用本机已有模型：
+Use this section when asking an AI coding agent to install Codex Voice on the same Mac.
 
-```json
-"ollama_model": "qwen3.6:35b-a3b",
-"ollama_fallback_models": [],
-"ollama_timeout_seconds": 7,
-"ollama_num_predict": 256,
-"ollama_num_ctx": 4096,
-"ollama_think": false,
-"ollama_keep_alive": -1,
-"ollama_skip_simple_utterances": true,
-"ollama_simple_max_chars": 8,
-"ollama_reject_aggressive_rewrite": true,
-"output_language": "zh-Hans+en",
-"force_simplified_chinese": true
-```
+Goal: install or update Codex Voice under `~/CodexVoice`, keep user configuration intact where possible, compile the menu bar Agent, and verify native hotkey/Ollama integration.
 
-极短句会跳过 Ollama，只执行规则替换，避免“继续”“好的”这类指令等待 35B。超过 8 个非空白字符的中文句子会进入 Ollama，以便按上下文修正“启动向/启动项”“后台中午/后台进程”这类中文多音字、同音或近音错词。修正提示词仍保持保守，只修语音识别词汇、技术术语、错别字和格式；如果模型输出看起来像大幅重写，会自动丢弃并使用规则纠错文本。
+Rules for the agent:
 
-最终输出会强制为“英文技术词 + 简体中文”。如果 Whisper 或 Ollama 偶尔给出繁体字，程序会在复制/粘贴前转成简体。
+- Do not delete `~/CodexVoice/config/terms.json`, `transcripts/`, recordings, logs, state, or user-edited config unless explicitly asked.
+- Do not run destructive git commands such as `git reset --hard`.
+- If the repo is cloned elsewhere, sync source files to `~/CodexVoice` before running the installer.
+- If Ollama is missing, report it and show the `ollama pull qwen3.6:35b-a3b` command; do not download large models without permission.
 
-查看本机模型：
+Recommended commands:
 
 ```bash
-ollama list
+mkdir -p ~/CodexVoice
+rsync -a --exclude .git /path/to/codex-voice/ ~/CodexVoice/
+bash ~/CodexVoice/bin/install.sh
 ```
 
-默认继续使用 `qwen3.6:35b-a3b`，因为它对中文口述纠错和术语替换更稳。冷启动可能接近 10 秒，热启动通常明显更快；`keep_alive: -1` 会让 Ollama 尽量一直保留模型在内存中，但每次纠错请求仍是全新的独立上下文。
-
-如果想改成更小或更快的模型，编辑：
+Verification commands:
 
 ```bash
-open -e ~/CodexVoice/config/config.json
+launchctl print gui/$(id -u)/com.codexvoice.agent
+codex-voice --status
+codex-voice-config --show
+codex-voice-config --list-ollama-models
 ```
 
-例如：
+After installation, the human user must grant Microphone and Accessibility permissions in macOS System Settings. The default built-in hotkey is `Option + Space`.
 
-```json
-"ollama_model": "qwen2.5-coder:1.5b"
-```
+## macOS Permissions
 
-注意：`qwen2.5-coder:1.5b` 很快，但可能把普通中文口述改成英文或 JSON，更适合临时测速，不建议默认使用。
+Two permissions are needed on first use.
 
-也可以直接在状态栏“纠错模型”菜单里选择。菜单按三段排列：第一段是内置纠错模型，例如 `规则纠错（不使用 LLM）`；第二段是 “Ollama 已安装纠错模型”，会列出本机 `ollama list` 扫描出的文本模型；第三段是 “外接在线 API”，OpenAI API 目前只作为未启用的预留项显示。Embedding 模型会被自动排除。
-
-选择纠错模型后，Agent 会自动预热当前模型；如果是 Ollama 模型，会请求 Ollama 将它加载到内存并按配置保持 `keep_alive`。准备或卸载过程中，再打开“纠错模型”菜单会看到动态进度条。菜单里的“从内存卸载当前纠错模型”只释放内存，不删除模型文件。
-
-Ollama 不可用、超时或输出为空时，程序会退回到规则替换后的文本，不会中断整个输入流程。
-
-## Whisper 模型
-
-默认配置针对 Apple Silicon：
-
-```json
-"transcription_profile": "mlx-whisper-turbo",
-"whisper_backend": "mlx-whisper",
-"whisper_model": "mlx-community/whisper-large-v3-turbo",
-"whisper_fallback_backend": "faster-whisper",
-"whisper_fallback_model": "large-v3-turbo"
-```
-
-第一次运行会下载 Whisper 模型，可能比较慢。后续会使用本地缓存。
-
-如果 MLX 转录失败，程序会尝试 `faster-whisper` fallback。`faster-whisper` 在 Apple Silicon 上通常走 CPU，速度可能比 MLX 慢。
-
-状态栏菜单里的“转录模型”可以切换：
-
-- `MLX Whisper large-v3-turbo`：默认推荐路线。
-- `faster-whisper large-v3-turbo`：兼容路线。
-- `Ollama 已安装转录模型`：通过本机 Ollama `/api/tags` 和 `/api/show` 扫描，只显示具备 `audio` 能力或名称看起来像 ASR/Whisper 的模型；当前未检测到时会显示“未检测到 Ollama 转录模型”。
-- `OpenAI API（未启用）`：预留入口，当前不会发起外部请求。
-
-选择转录模型后，状态栏 Agent 会在后台自动准备当前模型。内置模型还没下载时会触发下载/加载；再次打开“转录模型”菜单时，顶部会显示一个动态进度条。也可以手动点“预热当前转录模型”。
-
-## 术语表
-
-编辑：
-
-```bash
-open -e ~/CodexVoice/config/terms.json
-```
-
-常用内容：
-
-- `agent_tools`：Codex、MCP、Raycast、AGENTS.md 等。
-- `frontend` / `backend` / `devops`：框架、库、数据库、部署工具。
-- `commands`：常用命令。
-- `project_specific`：项目专有词、文件名、路径、包名。
-- `common_misrecognitions`：确定性的错词替换，例如“麦cp”到 `MCP`、“派普恩皮埃姆”到 `pnpm`。
-
-确定性替换会先于 LLM 纠错执行。
-
-## 使用方式
-
-普通模式，转录纠错后复制并自动粘贴：
-
-```bash
-python ~/CodexVoice/bin/codex-voice.py
-```
-
-Raycast 脚本默认使用 toggle 模式：第一次按快捷键开始后台录音，第二次按同一个快捷键会提交当前录音。后台模式不会因为短暂停顿或不说话超时自动提交；如果忘记第二次按键，5 分钟安全上限会结束录音并转写，避免麦克风一直开着。
-Raycast 自身只写入一个触发文件并立即返回；常驻的 `com.codexvoice.agent` LaunchAgent 会在后台处理录音和提交，所以 Raycast 不会等待 Python、Whisper 或 Ollama。
-状态栏常驻显示 `● CV` / `● REC`：黑色表示空闲，绿色表示正在录音，黄色表示正在识别、转写、纠错或粘贴。点击状态栏图标可以提交当前录音、取消当前录音、切换“显示录音浮窗”、选择转录模型、选择纠错模型、选择输入设备、请求粘贴权限、打开配置、打开转录记录和日志。开启“显示录音浮窗”时，录音中会显示一个置顶的 `REC 正在录音` 小浮窗，带有 `00:00 / 05:00` 计时；结束录音时浮窗会自动关闭。关闭后只看状态栏颜色，不显示浮窗。默认不再发送开始/结束通知。自动粘贴前会确认当前焦点是可编辑文本控件；任何应用里的文本框都会自动粘贴。如果当前焦点明确不是文本框，普通模式不会覆盖原剪贴板；Codex/OpenCode 作为例外会保留一份到剪贴板，方便手动粘贴。
-
-当前最长录音/识别时长是 `300` 秒，也就是 5 分钟。16kHz 单声道 wav 约 9.6MB；按普通中文口述速度，大约可覆盖 900 到 1200 个汉字左右，实际转写时间取决于内容长度。
-
-可以用 Raycast 里的 `Codex Voice Config` 修改最长录音分钟数，也可以在终端运行：
-
-```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --set-max-minutes 5
-```
-
-查看当前安装位置和配置：
-
-```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --show
-```
-
-```bash
-python ~/CodexVoice/bin/codex-voice.py --toggle
-python ~/CodexVoice/bin/codex-voice.py --submit-current
-python ~/CodexVoice/bin/codex-voice.py --cancel-current
-python ~/CodexVoice/bin/codex-voice.py --status
-```
-
-只复制到剪贴板，不自动粘贴：
-
-```bash
-python ~/CodexVoice/bin/codex-voice.py --mode copy-only
-```
-
-结构化严格模式：
-
-```bash
-python ~/CodexVoice/bin/codex-voice.py --mode strict
-```
-
-只输出到 stdout，不复制不粘贴：
-
-```bash
-python ~/CodexVoice/bin/codex-voice.py --stdout-only
-```
-
-Raycast 里推荐先使用 `Codex Voice Copy Only` 测试，确认转录和剪贴板正常后，再使用自动粘贴模式。
-
-## macOS 权限
-
-首次运行可能需要授权：
-
-- 麦克风权限：Raycast、Terminal、Python 或你触发脚本的宿主进程。
-- 辅助功能权限：`Codex Voice Agent.app`，用于原生模拟 `Cmd+V`。
-
-路径通常是：
+Microphone:
 
 ```text
 System Settings -> Privacy & Security -> Microphone
+```
+
+Grant access to `Codex Voice Agent.app` or the terminal/host that starts recording. If macOS does not show a prompt, click the microphone authorization button in the menu bar panel, then start recording again.
+
+Accessibility:
+
+```text
 System Settings -> Privacy & Security -> Accessibility
 ```
 
-如果已经确认是文本框但自动粘贴失败，文本仍会保留在剪贴板里，可以手动 `Cmd+V`。如果当前焦点明确不是文本框，普通模式会保留原剪贴板不变。
-
-## 历史记录
-
-成功转录后会保存 Markdown 到：
+Grant access to:
 
 ```text
-~/CodexVoice/transcripts/
+~/CodexVoice/Codex Voice Agent.app
 ```
 
-默认录音文件保存到：
+Accessibility is used only to check whether the focused element is editable and, when it is, to send `Cmd+V`. If the focus is not in a text field, Codex Voice will not force a paste; it leaves the final text in the clipboard.
 
-```text
-~/CodexVoice/recordings/
-```
+Source installs use ad-hoc signing. When the Agent is rebuilt or re-signed, the install script resets the Accessibility entry with `tccutil` and opens System Settings; macOS still requires the user to re-enable the permission manually.
 
-日志文件：
+## Privacy Defaults
 
-```text
-~/CodexVoice/logs/codex-voice.log
-```
-
-如不想保存录音，可在 `config.json` 里设置：
+Codex Voice is local-first. By default, audio recordings are temporary and deleted after transcription:
 
 ```json
-"save_recordings": false
+"save_recordings": false,
+"save_transcripts": true
 ```
 
-## 测试
+Transcripts are saved under `~/CodexVoice/transcripts` to help review recognition quality. Set `save_transcripts` to `false` if you do not want final text, raw text, and correction metadata stored on disk.
 
-安装后先测试帮助命令：
+## Native Hotkey
+
+The menu bar Agent registers a native global hotkey at startup. The default is `Option + Space`.
+
+Use the menu bar panel to:
+
+- record a new hotkey;
+- clear the current hotkey;
+- restore the default `Option + Space`.
+
+When the hotkey is pressed, the Agent directly calls `codex-voice.py --toggle`. Legacy external trigger-file integration has been removed from the main source tree; the resident Agent owns hotkey handling.
+
+## Ollama Setup
+
+After installing Ollama, pull the recommended correction model:
 
 ```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice.py --help
+ollama pull qwen3.6:35b-a3b
 ```
 
-然后测试只复制模式：
+If Ollama is not running on the default `127.0.0.1:11434`, set a launchd environment variable and restart the Agent:
 
 ```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice.py --mode copy-only
+launchctl setenv OLLAMA_HOST 127.0.0.1:11435
+bash ~/CodexVoice/bin/install-launch-agents.sh
 ```
 
-测试 Raycast toggle 行为时，按一次快捷键开始录音，说完后再按一次同一个快捷键提交。
+Codex Voice resolves the Ollama base URL in this order:
 
-建议说：
+1. `OLLAMA_HOST`
+2. `launchctl getenv OLLAMA_HOST`
+3. Explicit non-default `ollama_base_url` or `ollama_url` in config
+4. Default `http://127.0.0.1:11434`
 
-```text
-请帮我检查麦cp server 和派普恩皮埃姆 build 的问题
-```
-
-期望最终文本包含 `MCP server` 和 `pnpm build`。
-
-默认 Raycast 测试节奏：
-
-```text
-按一次快捷键 -> 菜单栏变绿色 `● REC` -> 说话 -> 再按一次同一个快捷键 -> 菜单栏变黄色 `● CV`
-```
-
-## 常见问题
-
-### 没有录到音
-
-先检查麦克风权限，然后看日志：
+Inspect detected models:
 
 ```bash
-tail -n 80 ~/CodexVoice/logs/codex-voice.log
+conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --list-ollama-models
 ```
 
-如果周围环境很吵，调高或调低：
+Warm the current correction model:
+
+```bash
+conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --prepare-current-correction-model
+```
+
+Key default correction settings:
 
 ```json
-"silence_threshold": 0.006,
-"min_audio_rms": 0.0048,
-"min_audio_peak": 0.02
+"ollama_model": "qwen3.6:35b-a3b",
+"ollama_num_ctx": 4000,
+"ollama_num_predict": 256,
+"ollama_keep_alive": -1,
+"ollama_timeout_seconds": 7,
+"ollama_skip_simple_utterances": true
 ```
 
-如果出现 `address address...`、`HelloHello...`、`從從從...` 这类重复文本，通常是短噪声触发了 Whisper 幻听。当前配置会先按整段音频 RMS/peak 过滤低能量噪声，再拦截重复幻听，避免复制或粘贴垃圾文本。
+Notes:
 
-### Raycast 一直转圈或录音不结束
+- `keep_alive: -1` is an Ollama request parameter. It asks Ollama to keep the qwen model in memory. It is unrelated to macOS LaunchAgent `KeepAlive`.
+- `num_ctx: 4000` targets ordinary correction of transcripts from voice recordings up to about ten minutes. Very long transcripts should still be split.
+- If Ollama is installed but the service is not running, the Agent will try to start or wake it.
+- If the default qwen model is not installed, the UI shows `未安装 qwen3.6:35b-a3b`. Codex Voice does not automatically download large models.
 
-现在 Raycast 入口是 `@raycast.mode silent`，只写触发文件，不直接执行 Python。再次触发同一个命令会由 `com.codexvoice.agent` 提交当前录音：
+## Model Recommendations
 
-```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice.py --submit-current
+Transcription models:
+
+| Model | Recommendation | Notes |
+| --- | --- | --- |
+| `mlx-community/whisper-large-v3-turbo` | Default recommendation | Best default balance of speed and accuracy on Apple Silicon. |
+| `faster-whisper large-v3-turbo` | Compatibility fallback | Used when MLX is unavailable. Usually slower, but broader compatibility. |
+| Ollama audio/Whisper-like models | Experimental | Shown only when local Ollama reports audio capability or model names that look like ASR/Whisper. |
+
+Correction models:
+
+| Model | Recommendation | Notes |
+| --- | --- | --- |
+| `qwen3.6:35b-a3b` | Default recommendation | Most stable for Chinese dictation correction, IT term preservation, and conservative edits. Requires more memory and works best kept loaded. |
+| Mid-size Qwen / coder models | Optional | Useful when memory is tight. Faster, but usually less stable for Chinese dictation than the default 35B. |
+| `qwen2.5-coder:1.5b` | Speed testing only | Very fast, but may over-transform natural dictation into code-like or English output. Not recommended as the default. |
+| `规则纠错（不使用 LLM）` | Fast fallback | No Ollama dependency. Use it when Ollama is unavailable or deterministic term replacement is enough. |
+
+Guidance:
+
+- Quality first: keep the default `mlx-whisper large-v3-turbo` + `qwen3.6:35b-a3b`.
+- Lower latency: keep qwen loaded and let short utterances bypass Ollama.
+- Lower memory: switch to rule-only correction or choose a smaller Ollama text model.
+
+## UI And Screenshot Guide
+
+The images below are stable screenshot guides. They explain the current menu bar UI and can be replaced by same-name real screenshots later without changing the README links.
+
+### Menu Bar Main Panel
+
+![Menu bar main panel screenshot guide](docs/assets/screenshots/status-panel.svg)
+
+Use the main panel as the daily control surface:
+
+- Status row: the dot and label show idle, recording, transcribing, or error state; the timer shows elapsed time and the selected recording limit; the red button quits the Agent.
+- Waveform area: gives a quick visual signal while recording or testing the input device.
+- Recording actions: `Start`, `Submit`, and `Cancel` match the first hotkey press, second hotkey press, and abort workflow.
+- Permissions and settings: microphone permission, Accessibility permission, native hotkey recording, reset/default controls, and the floating recording indicator are managed from this area.
+- Tabs: `Transcription Model`, `Correction Model`, and `Input Device` switch the compact card area without keeping stale height from another tab.
+- Bottom summary: shows the final active choices for state, transcription model, correction model, and input device.
+
+### Model Cards
+
+![Model card screenshot guide](docs/assets/screenshots/model-cards.svg)
+
+Model cards are intentionally compact and equal-height within the current tab:
+
+- Each card shows the source, model name, parameter size, architecture, and vendor when those fields are available.
+- The selected card is highlighted; unavailable or placeholder cards explain whether the system is scanning, starting Ollama, missing qwen, or missing an input device.
+- Long model names wrap inside the fixed card width. The horizontal card list can still be dragged or scrolled.
+- Loaded Ollama models show a circular `X` in the top-right corner. Clicking it unloads that model from memory only; it does not delete model files from disk.
+- When the configured qwen model is installed but not loaded, Codex Voice may show the model card while it prepares the model with Ollama `keep_alive` and the configured context size.
+
+### Native Hotkey
+
+![Native hotkey screenshot guide](docs/assets/screenshots/native-hotkey.svg)
+
+The settings overlay records the global hotkey used to start and submit dictation:
+
+- The default is `Option + Space`.
+- Ordinary key combinations must include at least one modifier. Codex Voice checks them with macOS public hotkey registration APIs before saving.
+- Modifier-only double-tap gestures, such as double Control, can be recorded, but macOS does not provide a public API for reliable conflict detection for that gesture type.
+- `Clear` disables the native hotkey; `Default` restores `Option + Space`.
+- The overlay blocks the panel underneath while open, so card hover and click behavior do not leak through it.
+
+### Quit And Unload Models
+
+![Quit confirmation screenshot guide](docs/assets/screenshots/quit-unload.svg)
+
+The quit flow is explicit about work that may continue outside the Agent:
+
+- If a recording worker is active, Codex Voice prompts before cancelling it and quitting.
+- If Ollama still has loaded models, the dialog lists their names and offers `Unload And Quit`, `Quit Only`, or `Cancel`.
+- `Unload And Quit` sends Ollama `keep_alive: 0` for the loaded models, then exits. It only unloads memory; it never deletes installed models.
+- Unload failures are reported but do not leave the Agent stuck forever; the quit path has a bounded timeout.
+
+## Common Operations
+
+```text
+Press the native hotkey once -> start recording
+Press the same hotkey again -> submit recording
 ```
 
-如果想直接取消当前后台 worker：
+Set maximum recording duration:
 
 ```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice.py --cancel-current
+conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --set-max-minutes 10
 ```
 
-如果状态文件异常，可删除：
+Open config, terms, transcripts, and logs:
 
 ```bash
-rm -f ~/CodexVoice/state/recording.pid ~/CodexVoice/state/submit.request
+open -e ~/CodexVoice/config/config.json
+open -e ~/CodexVoice/config/terms.json
+open ~/CodexVoice/transcripts
+tail -n 120 ~/CodexVoice/logs/codex-voice.log
 ```
 
-如果 Agent 没在运行，重新安装 LaunchAgent：
+## Configuration Files
 
-```bash
-~/CodexVoice/bin/install-launch-agents.sh
+Main config:
+
+```text
+~/CodexVoice/config/config.json
 ```
 
-### 状态栏图标没有出现
+Terms and deterministic replacements:
 
-状态栏图标由原生 Swift 小程序提供，并调用 Conda 里的 Python 语音流水线。重新编译并启动：
-
-```bash
-~/CodexVoice/bin/install-launch-agents.sh
+```text
+~/CodexVoice/config/terms.json
 ```
 
-如果仍然没有出现，检查日志：
+Correction prompt:
 
-```bash
-tail -n 80 ~/CodexVoice/logs/com.codexvoice.agent.err.log
+```text
+~/CodexVoice/config/correction_prompt.txt
 ```
 
-### 无法自动粘贴
+Deterministic replacements run before Ollama correction. Good candidates for `terms.json` include project names, library names, commands, file names, acronyms, and stable misrecognitions.
 
-给 `~/CodexVoice/Codex Voice Agent.app` 授予辅助功能权限。已经确认是文本框时，如果自动粘贴失败，文本会保留在剪贴板里。如果当前焦点明确不是文本框，程序会主动跳过粘贴并保留原剪贴板；Codex/OpenCode 例外，会复制到剪贴板作为兜底。
+## Troubleshooting
 
-### Whisper 模型加载慢
-
-第一次运行需要下载并加载模型。后续会快很多。若仍然太慢，可以把 `whisper_model` 换成较小的 MLX Whisper 模型。
-
-### Ollama 纠错失败
-
-确认服务在运行：
+Native hotkey does not work:
 
 ```bash
+tail -n 120 ~/CodexVoice/logs/codex-voice.log
+open -e ~/CodexVoice/config/config.json
+```
+
+Open the menu bar panel. If it says the hotkey is unavailable or may conflict, record a different key combination or restore the default.
+
+Agent is not running:
+
+```bash
+bash ~/CodexVoice/bin/install-launch-agents.sh
+launchctl print gui/$(id -u)/com.codexvoice.agent
+```
+
+Ollama models do not show:
+
+```bash
+which ollama
 ollama list
+conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --list-ollama-models
 ```
 
-如果模型太慢，可以临时改用小模型测速：
+If you use a non-default port, set `OLLAMA_HOST` and restart the Agent.
 
-```json
-"ollama_model": "qwen2.5-coder:1.5b"
-```
+Auto-paste does not happen:
 
-但小模型纠错质量明显不如 `qwen3.6:35b-a3b`。当前更推荐保留 35B，并依靠短句跳过、`num_ctx=4096`、7 秒超时和重复幻听过滤减少无效等待。
+- Grant Accessibility permission to `~/CodexVoice/Codex Voice Agent.app`.
+- If you just rebuilt the Agent, re-enable its Accessibility permission after the install script resets the entry and opens System Settings.
+- Make sure the current focus is a text field or text area.
+- Even when auto-paste is skipped, the final text is already in the clipboard and can be pasted manually with `Cmd+V`.
 
-### 技术词识别不准
+No microphone input:
 
-优先往 `terms.json` 的 `common_misrecognitions` 添加确定性替换，再补充到对应术语分类。
+- Check microphone permission.
+- Select the correct device from the Input Device tab in the menu bar panel.
+- Click the input test button and check whether RMS and Peak change.
 
-### Raycast 找不到脚本
+## Stop Or Uninstall
 
-确认目录添加的是：
-
-```text
-~/CodexVoice/raycast
-```
-
-确认脚本可执行：
+Stop the Agent:
 
 ```bash
-chmod +x ~/CodexVoice/raycast/*.sh
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.codexvoice.agent.plist
 ```
 
-## 后续升级
+Remove the LaunchAgent:
 
-- Raycast Extension 版，使用 `Clipboard.paste` 和更好的 UI 状态。
-- Silero VAD，替代 RMS 阈值检测。
-- 实时字幕浮窗。
-- MCP server，读取最近语音记录或把转录历史作为 Agent 上下文。
-- OpenAI API 或其他 HTTP LLM API 作为可选纠错后端。
+```bash
+rm -f ~/Library/LaunchAgents/com.codexvoice.agent.plist
+```
+
+Remove the runtime directory:
+
+```bash
+rm -rf ~/CodexVoice
+```
+
+To quit only the current run, click the red quit button in the menu bar panel. The macOS LaunchAgent `KeepAlive` value is `false`, so the system will not immediately relaunch the Agent after a user-initiated quit.
