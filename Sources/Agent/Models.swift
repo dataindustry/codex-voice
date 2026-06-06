@@ -5,7 +5,10 @@ import AVFoundation
 
 struct VoiceStatus {
     let status: String
+    let labelKey: String
     let label: String
+    let detailKey: String
+    let detailArgs: [String: String]
     let detail: String
     let pid: Int?
     let updatedAt: String
@@ -34,7 +37,11 @@ struct OllamaModel {
 struct ModelTask {
     let status: String
     let scope: String
+    let labelKey: String
+    let labelArgs: [String: String]
     let label: String
+    let detailKey: String
+    let detailArgs: [String: String]
     let detail: String
     let progress: Double?
     let updatedAt: String

@@ -4,6 +4,7 @@ import Foundation
 final class RecordingIndicator: NSObject, NSApplicationDelegate {
     private let parentPID: pid_t
     private let maxSeconds: TimeInterval
+    private let language: String
     private let startedAt = Date()
 
     private var window: NSPanel?
@@ -13,10 +14,44 @@ final class RecordingIndicator: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var signalSources: [DispatchSourceSignal] = []
 
-    init(parentPID: pid_t, maxSeconds: TimeInterval) {
+    init(parentPID: pid_t, maxSeconds: TimeInterval, language: String) {
         self.parentPID = parentPID
         self.maxSeconds = maxSeconds
+        self.language = RecordingIndicator.normalizedLanguage(language)
         super.init()
+    }
+
+    private static func normalizedLanguage(_ language: String) -> String {
+        if ["en", "zh-Hans", "zh-Hant", "ja"].contains(language) {
+            return language
+        }
+        return "en"
+    }
+
+    private func text(_ key: String) -> String {
+        let table: [String: [String: String]] = [
+            "en": [
+                "title": "REC  Recording",
+                "hint": "Press the shortcut again to submit",
+                "limit": "Recording limit is near"
+            ],
+            "zh-Hans": [
+                "title": "REC  正在录音",
+                "hint": "再按一次快捷键结束并转写",
+                "limit": "即将达到录音上限"
+            ],
+            "zh-Hant": [
+                "title": "REC  正在錄音",
+                "hint": "再按一次快捷鍵結束並轉寫",
+                "limit": "即將達到錄音上限"
+            ],
+            "ja": [
+                "title": "REC  録音中",
+                "hint": "もう一度ショートカットを押すと送信します",
+                "limit": "録音上限が近づいています"
+            ]
+        ]
+        return table[language]?[key] ?? table["en"]?[key] ?? key
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -63,7 +98,7 @@ final class RecordingIndicator: NSObject, NSApplicationDelegate {
         dot = dotView
 
         let title = label(
-            text: "REC  正在录音",
+            text: text("title"),
             frame: NSRect(x: 39, y: 65, width: 240, height: 28),
             font: .boldSystemFont(ofSize: 16),
             color: .white
@@ -80,7 +115,7 @@ final class RecordingIndicator: NSObject, NSApplicationDelegate {
         timerLabel = timerText
 
         let hint = label(
-            text: "再按一次快捷键结束并转写",
+            text: text("hint"),
             frame: NSRect(x: 14, y: 12, width: 280, height: 20),
             font: .systemFont(ofSize: 12),
             color: NSColor(calibratedWhite: 0.73, alpha: 1)
@@ -121,10 +156,10 @@ final class RecordingIndicator: NSObject, NSApplicationDelegate {
 
         let remaining = max(0, maxSeconds - elapsed)
         if remaining <= 30 {
-            hintLabel?.stringValue = "即将达到 5 分钟上限"
+            hintLabel?.stringValue = text("limit")
             hintLabel?.textColor = NSColor.systemYellow
         } else {
-            hintLabel?.stringValue = "再按一次快捷键结束并转写"
+            hintLabel?.stringValue = text("hint")
             hintLabel?.textColor = NSColor(calibratedWhite: 0.73, alpha: 1)
         }
 
@@ -170,8 +205,9 @@ func argumentValue(after flag: String) -> String? {
 
 let parentPID = pid_t(Int32(argumentValue(after: "--parent-pid") ?? "0") ?? 0)
 let maxSeconds = TimeInterval(Double(argumentValue(after: "--max-seconds") ?? "300") ?? 300)
+let language = argumentValue(after: "--language") ?? "en"
 
 let app = NSApplication.shared
-let delegate = RecordingIndicator(parentPID: parentPID, maxSeconds: maxSeconds)
+let delegate = RecordingIndicator(parentPID: parentPID, maxSeconds: maxSeconds, language: language)
 app.delegate = delegate
 app.run()

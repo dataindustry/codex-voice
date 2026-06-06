@@ -332,7 +332,7 @@ final class CardChoiceView: NSControl {
     private let contentStack = NSStackView()
     private let unloadButton = CardCloseButton()
     private let loadingOverlay = NSView()
-    private let loadingLabel = NSTextField(labelWithString: "正在加载")
+    private let loadingLabel = NSTextField(labelWithString: "")
     private let loadingDetailLabel = NSTextField(labelWithString: " ")
     private let loadingProgress = NSProgressIndicator()
     private var uniformHeightConstraint: NSLayoutConstraint?
@@ -460,7 +460,7 @@ final class CardChoiceView: NSControl {
         }
     }
 
-    func setLoadingTask(_ task: ModelTask?) {
+    func setLoadingTask(_ task: ModelTask?, config: [String: Any]) {
         guard let task else {
             loadingProgress.stopAnimation(nil)
             loadingOverlay.isHidden = true
@@ -468,8 +468,12 @@ final class CardChoiceView: NSControl {
         }
 
         loadingOverlay.isHidden = false
-        loadingLabel.stringValue = task.label.isEmpty ? "正在准备模型" : task.label
-        loadingDetailLabel.stringValue = task.detail.isEmpty ? "正在加载到内存" : task.detail
+        loadingLabel.stringValue = task.label.isEmpty
+            ? CodexVoiceI18n.text("menu.modelPreparing", config: config)
+            : task.label
+        loadingDetailLabel.stringValue = task.detail.isEmpty
+            ? CodexVoiceI18n.text("task.loading_ollama_memory", config: config)
+            : task.detail
 
         if let progress = task.progress {
             loadingProgress.stopAnimation(nil)

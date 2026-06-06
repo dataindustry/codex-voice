@@ -79,10 +79,14 @@ def test_paste_focus_unknown_prompts_accessibility_reenable(monkeypatch) -> None
     voice.paste_to_frontmost_app(
         "hello",
         True,
-        {"paste_requires_editable_focus": True, "notify_status": True},
+        {
+            "paste_requires_editable_focus": True,
+            "notify_status": True,
+            "ui_language": "zh-Hans",
+        },
         voice.logging.getLogger("test"),
     )
 
     assert copied == ["hello"]
     assert pasted == []
-    assert notices == [voice.ACCESSIBILITY_REENABLE_MESSAGE]
+    assert notices == [voice.t({"ui_language": "zh-Hans"}, "notify.accessibility")]

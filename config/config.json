@@ -64,6 +64,7 @@
   "silence_threshold" : 0.0060000000000000001,
   "start_timeout_seconds" : 6,
   "transcription_profile" : "mlx-whisper-turbo",
+  "ui_language" : "system",
   "whisper_backend" : "mlx-whisper",
   "whisper_beam_size" : 5,
   "whisper_fallback_backend" : "faster-whisper",

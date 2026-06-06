@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Voice 内置快捷键截图说明</title>
+  <desc id="desc">内置全局快捷键设置的简体中文示意截图。</desc>
+  <rect width="960" height="540" rx="28" fill="#f5f5f7"/>
+  <rect x="48" y="48" width="864" height="444" rx="20" fill="#ffffff" stroke="#d2d2d7" stroke-width="2"/>
+  <text x="82" y="96" fill="#1d1d1f" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="30" font-weight="800">内置快捷键</text>
+  <rect x="82" y="124" width="796" height="48" rx="10" fill="#f0f0f4"/>
+  <text x="108" y="155" fill="#4a4a4f" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18">菜单栏面板：设置 - 快捷键</text>
+  <rect x="82" y="208" width="796" height="58" rx="12" fill="#fafafa" stroke="#dedee3"/>
+  <text x="108" y="244" fill="#1d1d1f" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="21" font-weight="700">当前快捷键</text>
+  <text x="700" y="244" fill="#6e6e73" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18">Option + Space</text>
+  <rect x="82" y="278" width="796" height="58" rx="12" fill="#fafafa" stroke="#dedee3"/>
+  <text x="108" y="314" fill="#1d1d1f" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="21" font-weight="700">录制新快捷键</text>
+  <text x="700" y="314" fill="#6e6e73" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18">点击录制</text>
+  <rect x="82" y="348" width="796" height="58" rx="12" fill="#fafafa" stroke="#dedee3"/>
+  <text x="108" y="384" fill="#1d1d1f" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="21" font-weight="700">清除快捷键</text>
+  <text x="700" y="384" fill="#6e6e73" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18">禁用</text>
+  <rect x="82" y="418" width="796" height="58" rx="12" fill="#fafafa" stroke="#dedee3"/>
+  <text x="108" y="454" fill="#1d1d1f" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="21" font-weight="700">恢复默认</text>
+  <text x="700" y="454" fill="#6e6e73" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18">Option + Space</text>
+</svg>

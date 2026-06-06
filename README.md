@@ -1,12 +1,12 @@
 # Codex Voice Input
 
-Codex Voice Input is a local-first macOS voice input tool. Press the built-in global hotkey once to start recording, press it again to submit. Codex Voice transcribes Chinese speech mixed with English IT terminology, applies local term rules and Ollama correction, copies the result to the clipboard, and auto-pastes only when the current focus is confirmed to be an editable text field.
+Codex Voice Input is a local-first macOS voice input tool. Press the built-in global hotkey once to start recording, press it again to submit. Codex Voice transcribes, corrects, and outputs in the language selected in the menu bar settings: English, Simplified Chinese, Traditional Chinese, or Japanese. Technical terms, commands, paths, variables, and file names are preserved where possible. The final text is copied to the clipboard and auto-pasted only when the current focus is confirmed to be an editable text field.
 
 Languages: English | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [日本語](README.ja.md)
 
 ## Who It Is For
 
-- People who often dictate Chinese text mixed with English technical terms in Codex Desktop, Cursor, VS Code, browsers, chat tools, or any text field.
+- People who often dictate English, Simplified Chinese, Traditional Chinese, or Japanese mixed with technical terms in Codex Desktop, Cursor, VS Code, browsers, chat tools, or any text field.
 - People who want transcription and terminology correction to run primarily on the local machine.
 - People who want a fast global hotkey handled directly by the resident menu bar Agent.
 
@@ -14,8 +14,9 @@ Languages: English | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-
 
 - Built-in global hotkey: default `Option + Space`; record a different combination from the menu bar panel.
 - macOS menu bar panel: recording controls, permissions, models, input devices, logs, and model management in one popover.
+- Four-language workflow: the UI language setting also controls Whisper recognition language, Ollama correction prompts, CLI user output, and final output script.
 - Local transcription: defaults to Apple Silicon-friendly `mlx-whisper` large-v3-turbo with a `faster-whisper` fallback.
-- Local correction: defaults to Ollama `qwen3.6:35b-a3b` for conservative correction of Chinese recognition errors, technical terms, and formatting.
+- Local correction: defaults to Ollama `qwen3.6:35b-a3b` for conservative correction of recognition errors, technical terms, and formatting.
 - Unified paste behavior: always writes final text to the clipboard first; sends `Cmd+V` only when the focused element is editable.
 - Model management: can start Ollama, load the configured qwen model, keep it alive, and unload loaded models from the UI.
 
@@ -28,9 +29,10 @@ Built-in global hotkey
 com.codexvoice.agent LaunchAgent
         |
         +-- recording, submit, cancel, menu bar UI
-        +-- Whisper transcription
+        +-- UI/runtime language resolution
+        +-- Whisper transcription in the resolved language
         +-- deterministic term replacement from terms.json
-        +-- Ollama local LLM correction
+        +-- Ollama local LLM correction in the resolved language
         +-- pbcopy to clipboard
         +-- Cmd+V only when the current focus is editable
 ```
@@ -166,6 +168,28 @@ Use the menu bar panel to:
 
 When the hotkey is pressed, the Agent directly calls `codex-voice.py --toggle`. Legacy external trigger-file integration has been removed from the main source tree; the resident Agent owns hotkey handling.
 
+## Language And Output Policy
+
+Codex Voice does not auto-detect the speaker language. The language selected in the settings overlay is the product policy for the whole pipeline:
+
+| Setting | Whisper language | Correction/output behavior |
+| --- | --- | --- |
+| `Follow System` | Resolved from macOS preferred languages; unsupported system languages fall back to English. | Uses the resolved language below. |
+| `English` | `en` | Corrects and outputs English. |
+| `简体中文` | `zh` | Corrects and outputs Simplified Chinese; English technical terms stay in English. |
+| `繁體中文` | `zh` | Corrects and outputs Traditional Chinese; English technical terms stay in English. |
+| `日本語` | `ja` | Corrects and outputs Japanese; English technical terms stay in English. |
+
+You can change this from the menu bar panel settings overlay, or from the CLI:
+
+```bash
+codex-voice-config --set-ui-language system
+codex-voice-config --set-ui-language en
+codex-voice-config --set-ui-language zh-Hans
+codex-voice-config --set-ui-language zh-Hant
+codex-voice-config --set-ui-language ja
+```
+
 ## Ollama Setup
 
 After installing Ollama, pull the recommended correction model:
@@ -216,7 +240,7 @@ Notes:
 - `keep_alive: -1` is an Ollama request parameter. It asks Ollama to keep the qwen model in memory. It is unrelated to macOS LaunchAgent `KeepAlive`.
 - `num_ctx: 4000` targets ordinary correction of transcripts from voice recordings up to about ten minutes. Very long transcripts should still be split.
 - If Ollama is installed but the service is not running, the Agent will try to start or wake it.
-- If the default qwen model is not installed, the UI shows `未安装 qwen3.6:35b-a3b`. Codex Voice does not automatically download large models.
+- If the default qwen model is not installed, the UI shows a localized "not installed" card for `qwen3.6:35b-a3b`. Codex Voice does not automatically download large models.
 
 ## Model Recommendations
 
@@ -232,10 +256,10 @@ Correction models:
 
 | Model | Recommendation | Notes |
 | --- | --- | --- |
-| `qwen3.6:35b-a3b` | Default recommendation | Most stable for Chinese dictation correction, IT term preservation, and conservative edits. Requires more memory and works best kept loaded. |
+| `qwen3.6:35b-a3b` | Default recommendation | Strong local default for multilingual dictation correction, IT term preservation, and conservative edits. Requires more memory and works best kept loaded. |
 | Mid-size Qwen / coder models | Optional | Useful when memory is tight. Faster, but usually less stable for Chinese dictation than the default 35B. |
 | `qwen2.5-coder:1.5b` | Speed testing only | Very fast, but may over-transform natural dictation into code-like or English output. Not recommended as the default. |
-| `规则纠错（不使用 LLM）` | Fast fallback | No Ollama dependency. Use it when Ollama is unavailable or deterministic term replacement is enough. |
+| `Rule correction (no LLM)` | Fast fallback | No Ollama dependency. Use it when Ollama is unavailable or deterministic term replacement is enough. |
 
 Guidance:
 
@@ -245,24 +269,24 @@ Guidance:
 
 ## UI And Screenshot Guide
 
-The images below are stable screenshot guides. They explain the current menu bar UI and can be replaced by same-name real screenshots later without changing the README links.
+The images below are English screenshot guides. The other READMEs point to their own localized screenshot paths, so real screenshots can be replaced per language without changing the document links.
 
 ### Menu Bar Main Panel
 
-![Menu bar main panel screenshot guide](docs/assets/screenshots/status-panel.svg)
+![Menu bar main panel screenshot guide](docs/assets/screenshots/en/status-panel.svg)
 
 Use the main panel as the daily control surface:
 
 - Status row: the dot and label show idle, recording, transcribing, or error state; the timer shows elapsed time and the selected recording limit; the red button quits the Agent.
 - Waveform area: gives a quick visual signal while recording or testing the input device.
 - Recording actions: `Start`, `Submit`, and `Cancel` match the first hotkey press, second hotkey press, and abort workflow.
-- Permissions and settings: microphone permission, Accessibility permission, native hotkey recording, reset/default controls, and the floating recording indicator are managed from this area.
+- Permissions and settings: language selection, microphone permission, Accessibility permission, native hotkey recording, reset/default controls, and the floating recording indicator are managed from this area.
 - Tabs: `Transcription Model`, `Correction Model`, and `Input Device` switch the compact card area without keeping stale height from another tab.
 - Bottom summary: shows the final active choices for state, transcription model, correction model, and input device.
 
 ### Model Cards
 
-![Model card screenshot guide](docs/assets/screenshots/model-cards.svg)
+![Model card screenshot guide](docs/assets/screenshots/en/model-cards.svg)
 
 Model cards are intentionally compact and equal-height within the current tab:
 
@@ -274,7 +298,7 @@ Model cards are intentionally compact and equal-height within the current tab:
 
 ### Native Hotkey
 
-![Native hotkey screenshot guide](docs/assets/screenshots/native-hotkey.svg)
+![Native hotkey screenshot guide](docs/assets/screenshots/en/native-hotkey.svg)
 
 The settings overlay records the global hotkey used to start and submit dictation:
 
@@ -286,7 +310,7 @@ The settings overlay records the global hotkey used to start and submit dictatio
 
 ### Quit And Unload Models
 
-![Quit confirmation screenshot guide](docs/assets/screenshots/quit-unload.svg)
+![Quit confirmation screenshot guide](docs/assets/screenshots/en/quit-unload.svg)
 
 The quit flow is explicit about work that may continue outside the Agent:
 
@@ -324,6 +348,14 @@ Main config:
 ```text
 ~/CodexVoice/config/config.json
 ```
+
+Important language fields:
+
+```json
+"ui_language": "system"
+```
+
+`ui_language` may be `system`, `en`, `zh-Hans`, `zh-Hant`, or `ja`. It drives UI text, CLI user output, Whisper language, Ollama correction prompts, and final output script. Legacy fields such as `output_language` and `force_simplified_chinese` may still be read for compatibility, but new configuration should use `ui_language`.
 
 Terms and deterministic replacements:
 

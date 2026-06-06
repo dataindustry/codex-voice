@@ -26,6 +26,7 @@ final class CodexVoicePanelController: NSViewController {
     var onSetNativeHotkey: ((NativeHotkey) -> Void)?
     var onClearNativeHotkey: (() -> Void)?
     var onResetNativeHotkey: (() -> Void)?
+    var onSetUILanguage: ((String) -> Void)?
     var onPreferredContentSizeChange: ((NSSize) -> Void)?
 
     private enum Metrics {
@@ -46,7 +47,10 @@ final class CodexVoicePanelController: NSViewController {
 
     private var currentStatus = VoiceStatus(
         status: "idle",
-        label: "空闲",
+        labelKey: "status.idle",
+        label: "",
+        detailKey: "",
+        detailArgs: [:],
         detail: "",
         pid: nil,
         updatedAt: "",
@@ -57,14 +61,14 @@ final class CodexVoicePanelController: NSViewController {
     private var currentInputDevices: [InputDevice] = []
     private var currentTranscriptionModels: [OllamaModel] = []
     private var currentCorrectionModels: [OllamaModel] = []
-    private var currentInputProbeResult = "未测试"
+    private var currentInputProbeResult = ""
     private var inputProbeInFlight = false
     private var scanningModels = false
-    private var currentNativeHotkeyStatus = "未注册"
+    private var currentNativeHotkeyStatus = "unregistered"
     private var currentMaintenance = PanelMaintenance(
         pythonPath: "",
         launchAgentStatus: "com.codexvoice.agent",
-        ollamaStatus: "正在扫描",
+        ollamaStatus: "",
         ollamaStatusCode: "scanning",
         ollamaBaseURL: ""
     )
@@ -82,11 +86,11 @@ final class CodexVoicePanelController: NSViewController {
     private var rootStack: NSStackView?
 
     private let statusDot = CircleControl(color: .white, diameter: 9)
-    private let statusLabel = NSTextField(labelWithString: "空闲")
+    private let statusLabel = NSTextField(labelWithString: "")
     private let durationLabel = NSTextField(labelWithString: "0:00 /")
     private let maxMinutesPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let stageLabel = NSTextField(labelWithString: "阶段：空闲")
-    private let modelTaskLabel = NSTextField(labelWithString: "模型：空闲")
+    private let stageLabel = NSTextField(labelWithString: "")
+    private let modelTaskLabel = NSTextField(labelWithString: "")
     private let modelTaskDetailLabel = NSTextField(labelWithString: " ")
     private let modelProgress = NSProgressIndicator()
     private let waveformView = AudioWaveformView()
@@ -95,23 +99,28 @@ final class CodexVoicePanelController: NSViewController {
     private let settingsCloseButton = NSButton(title: "", target: nil, action: nil)
     private let quitButton = CircleControl(color: .systemRed, diameter: 11)
 
-    private let startButton = NSButton(title: "开始", target: nil, action: nil)
-    private let submitButton = NSButton(title: "提交", target: nil, action: nil)
-    private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
+    private let startButton = NSButton(title: "", target: nil, action: nil)
+    private let submitButton = NSButton(title: "", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "", target: nil, action: nil)
     private let indicatorButton = NSButton(title: "", target: nil, action: nil)
-    private let hotkeyValueLabel = NSTextField(labelWithString: "⌥Space")
-    private let recordHotkeyButton = NSButton(title: "录制", target: nil, action: nil)
-    private let clearHotkeyButton = NSButton(title: "清除", target: nil, action: nil)
-    private let resetHotkeyButton = NSButton(title: "默认", target: nil, action: nil)
+    private let hotkeyNameLabel = NSTextField(labelWithString: "")
+    private let hotkeyValueLabel = NSTextField(labelWithString: "")
+    private let recordHotkeyButton = NSButton(title: "", target: nil, action: nil)
+    private let clearHotkeyButton = NSButton(title: "", target: nil, action: nil)
+    private let resetHotkeyButton = NSButton(title: "", target: nil, action: nil)
 
-    private let stateValueLabel = NSTextField(labelWithString: "空闲")
+    private let stateNameLabel = NSTextField(labelWithString: "")
+    private let transcriptionNameLabel = NSTextField(labelWithString: "")
+    private let correctionNameLabel = NSTextField(labelWithString: "")
+    private let inputNameLabel = NSTextField(labelWithString: "")
+    private let stateValueLabel = NSTextField(labelWithString: "")
     private let transcriptionValueLabel = NSTextField(labelWithString: "")
     private let correctionValueLabel = NSTextField(labelWithString: "")
     private let inputValueLabel = NSTextField(labelWithString: "")
 
     private let tabContainer = NSView()
     private let tabControl = NSSegmentedControl(
-        labels: ["转录模型", "纠错模型", "输入设备"],
+        labels: ["", "", ""],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -131,10 +140,18 @@ final class CodexVoicePanelController: NSViewController {
     private let inputCardsDocument = FlippedDocumentView()
     private let inputCardsStack = NSStackView()
 
-    private let probeButton = NSButton(title: "测试输入", target: nil, action: nil)
-    private let probeResultLabel = NSTextField(labelWithString: "未测试")
-    private let maxMinutesLabel = NSTextField(labelWithString: "录音上限：5 分钟")
+    private let probeButton = NSButton(title: "", target: nil, action: nil)
+    private let probeResultLabel = NSTextField(labelWithString: "")
+    private let maxMinutesLabel = NSTextField(labelWithString: "")
     private let maxMinutesStepper = NSStepper()
+    private let settingsTitleLabel = NSTextField(labelWithString: "")
+    private let permissionsSectionLabel = NSTextField(labelWithString: "")
+    private let languageSectionLabel = NSTextField(labelWithString: "")
+    private let hotkeySectionLabel = NSTextField(labelWithString: "")
+    private let languageNameLabel = NSTextField(labelWithString: "")
+    private let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let microphonePermissionButton = NSButton(title: "", target: nil, action: nil)
+    private let accessibilityPermissionButton = NSButton(title: "", target: nil, action: nil)
     private var isRecordingHotkey = false
     private var hotkeyMonitor: Any?
     private var hotkeyRecordingModifier: String?
@@ -221,7 +238,6 @@ final class CodexVoicePanelController: NSViewController {
         let row = horizontalStack(spacing: 8)
         statusDot.target = self
         statusDot.action = #selector(statusDotClicked(_:))
-        statusDot.toolTip = "点击测试当前输入，再点停止测试"
         statusDot.widthAnchor.constraint(equalToConstant: 18).isActive = true
         statusDot.heightAnchor.constraint(equalToConstant: 18).isActive = true
         statusLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
@@ -233,17 +249,12 @@ final class CodexVoicePanelController: NSViewController {
         durationLabel.widthAnchor.constraint(equalToConstant: 54).isActive = true
         maxMinutesPopup.controlSize = .small
         maxMinutesPopup.font = NSFont.systemFont(ofSize: 11)
-        maxMinutesPopup.removeAllItems()
-        for minute in 1...10 {
-            maxMinutesPopup.addItem(withTitle: "\(minute) 分钟")
-        }
         maxMinutesPopup.target = self
         maxMinutesPopup.action = #selector(maxMinutesPopupChanged(_:))
         maxMinutesPopup.widthAnchor.constraint(equalToConstant: 74).isActive = true
         configureSettingsButton()
         quitButton.target = self
         quitButton.action = #selector(quitClicked(_:))
-        quitButton.toolTip = "退出 Codex Voice Agent"
         quitButton.widthAnchor.constraint(equalToConstant: 18).isActive = true
         quitButton.heightAnchor.constraint(equalToConstant: 18).isActive = true
         row.addArrangedSubview(statusDot)
@@ -289,9 +300,7 @@ final class CodexVoicePanelController: NSViewController {
         indicatorButton.action = #selector(indicatorClicked(_:))
 
         for button in [startButton, submitButton, cancelButton] {
-            button.bezelStyle = .rounded
-            button.controlSize = .small
-            button.widthAnchor.constraint(equalToConstant: 56).isActive = true
+            configureAdaptiveTextButton(button, minWidth: 56)
             row.addArrangedSubview(button)
         }
         row.addArrangedSubview(makeFlexibleSpacer())
@@ -303,10 +312,38 @@ final class CodexVoicePanelController: NSViewController {
     private func makePermissionSettingsRow() -> NSView {
         let row = horizontalStack(spacing: 8)
         row.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
-        let microphoneButton = compactButton("麦克风授权", #selector(microphoneClicked(_:)), width: 84)
-        let accessibilityButton = compactButton("辅助功能授权", #selector(pasteClicked(_:)), width: 98)
-        row.addArrangedSubview(microphoneButton)
-        row.addArrangedSubview(accessibilityButton)
+        configureCompactButton(
+            microphonePermissionButton,
+            action: #selector(microphoneClicked(_:)),
+            width: 112
+        )
+        configureCompactButton(
+            accessibilityPermissionButton,
+            action: #selector(pasteClicked(_:)),
+            width: 132
+        )
+        row.addArrangedSubview(microphonePermissionButton)
+        row.addArrangedSubview(accessibilityPermissionButton)
+        row.addArrangedSubview(makeFlexibleSpacer())
+        return row
+    }
+
+    private func makeLanguageSettingsRow() -> NSView {
+        let row = horizontalStack(spacing: 8)
+        row.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
+
+        languageNameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        languageNameLabel.textColor = .secondaryLabelColor
+        languageNameLabel.widthAnchor.constraint(equalToConstant: Metrics.routeLabelWidth).isActive = true
+
+        languagePopup.controlSize = .small
+        languagePopup.font = NSFont.systemFont(ofSize: 11)
+        languagePopup.target = self
+        languagePopup.action = #selector(languagePopupChanged(_:))
+        languagePopup.widthAnchor.constraint(equalToConstant: 188).isActive = true
+
+        row.addArrangedSubview(languageNameLabel)
+        row.addArrangedSubview(languagePopup)
         row.addArrangedSubview(makeFlexibleSpacer())
         return row
     }
@@ -317,20 +354,21 @@ final class CodexVoicePanelController: NSViewController {
         row.setContentHuggingPriority(.required, for: .vertical)
         row.setContentCompressionResistancePriority(.required, for: .vertical)
 
-        let nameLabel = NSTextField(labelWithString: "快捷键：")
-        nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        nameLabel.textColor = .secondaryLabelColor
-        nameLabel.widthAnchor.constraint(equalToConstant: Metrics.routeLabelWidth).isActive = true
+        hotkeyNameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        hotkeyNameLabel.textColor = .secondaryLabelColor
+        hotkeyNameLabel.widthAnchor.constraint(equalToConstant: Metrics.routeLabelWidth).isActive = true
 
         hotkeyValueLabel.font = NSFont.systemFont(ofSize: 12)
         hotkeyValueLabel.lineBreakMode = .byTruncatingMiddle
-        hotkeyValueLabel.widthAnchor.constraint(equalToConstant: 244).isActive = true
+        hotkeyValueLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 244).isActive = true
+        hotkeyValueLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        hotkeyValueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         configureHotkeyButton(recordHotkeyButton, action: #selector(recordHotkeyClicked(_:)), width: 52)
         configureHotkeyButton(clearHotkeyButton, action: #selector(clearHotkeyClicked(_:)), width: 52)
         configureHotkeyButton(resetHotkeyButton, action: #selector(resetHotkeyClicked(_:)), width: 52)
 
-        row.addArrangedSubview(nameLabel)
+        row.addArrangedSubview(hotkeyNameLabel)
         row.addArrangedSubview(hotkeyValueLabel)
         row.addArrangedSubview(makeFlexibleSpacer())
         row.addArrangedSubview(recordHotkeyButton)
@@ -344,10 +382,10 @@ final class CodexVoicePanelController: NSViewController {
         stack.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
         stack.setContentHuggingPriority(.required, for: .vertical)
         stack.setContentCompressionResistancePriority(.required, for: .vertical)
-        stack.addArrangedSubview(routeRow("状态", stateValueLabel))
-        stack.addArrangedSubview(routeRow("转录模型", transcriptionValueLabel))
-        stack.addArrangedSubview(routeRow("纠错模型", correctionValueLabel))
-        stack.addArrangedSubview(routeRow("输入设备", inputValueLabel))
+        stack.addArrangedSubview(routeRow(stateNameLabel, stateValueLabel))
+        stack.addArrangedSubview(routeRow(transcriptionNameLabel, transcriptionValueLabel))
+        stack.addArrangedSubview(routeRow(correctionNameLabel, correctionValueLabel))
+        stack.addArrangedSubview(routeRow(inputNameLabel, inputValueLabel))
         return stack
     }
 
@@ -406,6 +444,7 @@ final class CodexVoicePanelController: NSViewController {
     }
 
     private func refreshStaticAndDynamicViews() {
+        refreshLocalization()
         refreshStatusArea()
         refreshQuickActions()
         refreshHotkeyArea()
@@ -416,12 +455,77 @@ final class CodexVoicePanelController: NSViewController {
         updatePreferredContentSize()
     }
 
+    private func refreshLocalization() {
+        startButton.title = t("panel.start")
+        submitButton.title = t("panel.submit")
+        cancelButton.title = t("panel.cancel")
+        clearHotkeyButton.title = t("panel.clear")
+        resetHotkeyButton.title = t("panel.default")
+        microphonePermissionButton.title = t("panel.microphonePermission")
+        accessibilityPermissionButton.title = t("panel.accessibilityPermission")
+        settingsTitleLabel.stringValue = t("panel.settings")
+        permissionsSectionLabel.stringValue = t("panel.permissions")
+        languageSectionLabel.stringValue = t("panel.languageSection")
+        hotkeySectionLabel.stringValue = t("panel.hotkey")
+        languageNameLabel.stringValue = t("panel.language")
+        hotkeyNameLabel.stringValue = t("panel.hotkey")
+        stateNameLabel.stringValue = "\(t("panel.route.status")):"
+        transcriptionNameLabel.stringValue = "\(t("panel.route.transcription")):"
+        correctionNameLabel.stringValue = "\(t("panel.route.correction")):"
+        inputNameLabel.stringValue = "\(t("panel.route.input")):"
+        statusDot.toolTip = t("panel.inputTestTooltip")
+        quitButton.toolTip = t("panel.quitTooltip")
+        settingsButton.toolTip = t("panel.settings")
+        settingsCloseButton.toolTip = t("panel.closeSettings")
+        indicatorButton.toolTip = t("panel.floatingIndicatorTooltip")
+        tabControl.setLabel(t("panel.tab.transcription"), forSegment: 0)
+        tabControl.setLabel(t("panel.tab.correction"), forSegment: 1)
+        tabControl.setLabel(t("panel.tab.input"), forSegment: 2)
+        refreshLanguagePopup()
+        refreshMaxMinutesPopupItems()
+    }
+
+    private func refreshLanguagePopup() {
+        let configured = CodexVoiceI18n.normalize(currentConfig["ui_language"])
+        let previousTarget = languagePopup.target
+        let previousAction = languagePopup.action
+        languagePopup.target = nil
+        languagePopup.action = nil
+        languagePopup.removeAllItems()
+        for language in CodexVoiceI18n.supportedLanguages {
+            languagePopup.addItem(withTitle: CodexVoiceI18n.languageLabel(language, config: currentConfig))
+            languagePopup.lastItem?.representedObject = language
+        }
+        if let index = languagePopup.itemArray.firstIndex(where: { item in
+            (item.representedObject as? String) == configured
+        }) {
+            languagePopup.selectItem(at: index)
+        }
+        languagePopup.target = previousTarget
+        languagePopup.action = previousAction
+    }
+
+    private func refreshMaxMinutesPopupItems() {
+        let selectedIndex = max(0, min(9, Int(currentMaxRecordingMinutes()) - 1))
+        let previousTarget = maxMinutesPopup.target
+        let previousAction = maxMinutesPopup.action
+        maxMinutesPopup.target = nil
+        maxMinutesPopup.action = nil
+        maxMinutesPopup.removeAllItems()
+        for minute in 1...10 {
+            maxMinutesPopup.addItem(withTitle: t("panel.minutes", ["minutes": "\(minute)"]))
+        }
+        maxMinutesPopup.selectItem(at: selectedIndex)
+        maxMinutesPopup.target = previousTarget
+        maxMinutesPopup.action = previousAction
+    }
+
     private func refreshStatusArea() {
         let testingInput = currentStatus.status == "idle" && (inputTestActive || inputProbeInFlight)
         statusDot.fillColor = testingInput
             ? .systemGreen
             : colorForStatus(currentStatus.status, stale: currentStatus.isStale)
-        setText(statusLabel, testingInput ? "测试输入" : currentStatus.label)
+        setText(statusLabel, testingInput ? t("panel.testInput") : localizedStatusLabel(currentStatus))
         setText(durationLabel, durationText())
         refreshMaxMinutesPopup()
         waveformView.toolTip = testingInput ? currentInputProbeResult : nil
@@ -430,11 +534,11 @@ final class CodexVoicePanelController: NSViewController {
             level: testingInput ? probeLevelFromResult() : 0.42
         )
 
-        let stageDetail = currentStatus.detail.isEmpty ? currentStatus.label : currentStatus.detail
-        setText(stageLabel, "阶段：\(stageDetail)")
+        let stageDetail = localizedStatusDetail(currentStatus)
+        setText(stageLabel, t("panel.stage", ["value": stageDetail]))
 
         guard let task = currentModelTask else {
-            setText(modelTaskLabel, "模型：空闲")
+            setText(modelTaskLabel, t("panel.modelIdle"))
             setText(modelTaskDetailLabel, " ")
             modelProgress.stopAnimation(nil)
             modelProgress.isHidden = true
@@ -444,13 +548,25 @@ final class CodexVoicePanelController: NSViewController {
 
         let statusText: String
         switch task.status {
-        case "running": statusText = "运行中"
-        case "succeeded": statusText = "已完成"
-        case "failed": statusText = "失败"
+        case "running": statusText = t("panel.modelRunning")
+        case "succeeded": statusText = t("panel.modelSucceeded")
+        case "failed": statusText = t("panel.modelFailed")
         default: statusText = task.status
         }
-        setText(modelTaskLabel, "模型：\(statusText) · \(task.label)")
-        setText(modelTaskDetailLabel, task.detail.isEmpty ? " " : task.detail)
+        let taskLabel = CodexVoiceI18n.modelTaskText(
+            label: task.label,
+            key: task.labelKey,
+            args: task.labelArgs,
+            config: currentConfig
+        )
+        let taskDetail = CodexVoiceI18n.modelTaskText(
+            label: task.detail,
+            key: task.detailKey,
+            args: task.detailArgs,
+            config: currentConfig
+        )
+        setText(modelTaskLabel, t("panel.model", ["status": statusText, "label": taskLabel]))
+        setText(modelTaskDetailLabel, taskDetail.isEmpty ? " " : taskDetail)
         guard task.status == "running" else {
             modelProgress.stopAnimation(nil)
             modelProgress.isHidden = true
@@ -476,26 +592,29 @@ final class CodexVoicePanelController: NSViewController {
     }
 
     private func refreshHotkeyArea() {
-        recordHotkeyButton.title = isRecordingHotkey ? "取消" : "录制"
+        recordHotkeyButton.title = isRecordingHotkey ? t("panel.cancel") : t("panel.record")
         let enabled = configBool("native_hotkey_enabled", defaultValue: true)
         clearHotkeyButton.isEnabled = enabled && !isRecordingHotkey
         resetHotkeyButton.isEnabled = !isRecordingHotkey
 
         guard !isRecordingHotkey else {
             hotkeyValueLabel.textColor = .systemYellow
-            setText(hotkeyValueLabel, "按组合键")
+            setText(hotkeyValueLabel, t("panel.pressHotkey"))
             return
         }
 
         hotkeyValueLabel.textColor = enabled ? .labelColor : .secondaryLabelColor
         let hotkey = NativeHotkey.from(config: currentConfig)
-        let base = enabled ? hotkey.displayName : "已关闭"
-        let status = currentNativeHotkeyStatus.isEmpty ? "" : " · \(currentNativeHotkeyStatus)"
+        let base = enabled ? hotkey.displayName : t("panel.hotkeyOff")
+        let localizedStatus = localizedNativeHotkeyStatus(currentNativeHotkeyStatus)
+        let status = localizedStatus.isEmpty ? "" : " · \(localizedStatus)"
         setText(hotkeyValueLabel, "\(base)\(status)")
     }
 
     private func refreshRouteArea() {
-        let stateDetail = currentStatus.detail.isEmpty ? currentStatus.label : "\(currentStatus.label) · \(currentStatus.detail)"
+        let label = localizedStatusLabel(currentStatus)
+        let detail = localizedStatusDetail(currentStatus)
+        let stateDetail = detail == label ? label : "\(label) · \(detail)"
         setText(stateValueLabel, stateDetail)
         setText(transcriptionValueLabel, transcriptionLabel())
         setText(correctionValueLabel, correctionLabel())
@@ -503,7 +622,9 @@ final class CodexVoicePanelController: NSViewController {
     }
 
     private func refreshDynamicModelSections() {
+        let languageSignature = CodexVoiceI18n.resolved(config: currentConfig)
         let transcriptionSig = [
+            languageSignature,
             transcriptionProfile(),
             stringConfig("ollama_transcription_model", defaultValue: ""),
             currentTranscriptionModels.isEmpty && scanningModels ? "scanning" : "ready",
@@ -523,6 +644,7 @@ final class CodexVoicePanelController: NSViewController {
         }
 
         let correctionSig = [
+            languageSignature,
             correctionProfile(),
             stringConfig("ollama_model", defaultValue: ""),
             currentMaintenance.ollamaStatusCode,
@@ -544,6 +666,7 @@ final class CodexVoicePanelController: NSViewController {
         }
 
         let inputSig = [
+            languageSignature,
             currentConfig["input_device"] as? String ?? "",
             currentInputDevices.isEmpty && scanningModels ? "scanning" : "ready",
             currentInputDevices.map { "\($0.name):\($0.isDefault):\($0.channels ?? 0)" }.joined(separator: "|")
@@ -567,7 +690,7 @@ final class CodexVoicePanelController: NSViewController {
         let profile = transcriptionProfile()
         let selectedOllama = stringConfig("ollama_transcription_model", defaultValue: "")
         transcriptionCardsStack.addArrangedSubview(cardButton(
-            source: "内置",
+            source: t("card.builtin"),
             title: "MLX Whisper large-v3-turbo",
             parameter: "809M",
             architecture: "Whisper Transformer",
@@ -577,7 +700,7 @@ final class CodexVoicePanelController: NSViewController {
             action: #selector(transcriptionChoiceClicked(_:))
         ))
         transcriptionCardsStack.addArrangedSubview(cardButton(
-            source: "内置",
+            source: t("card.builtin"),
             title: "faster-whisper large-v3-turbo",
             parameter: "809M",
             architecture: "Whisper Transformer",
@@ -588,14 +711,26 @@ final class CodexVoicePanelController: NSViewController {
         ))
 
         if scanningModels {
-            transcriptionCardsStack.addArrangedSubview(statusCard("Ollama", "正在扫描", "参数：-", "架构：-", "厂家：Ollama"))
+            transcriptionCardsStack.addArrangedSubview(statusCard(
+                t("card.ollama"),
+                t("card.scanning"),
+                "-",
+                "-",
+                "Ollama"
+            ))
         } else if currentTranscriptionModels.isEmpty {
-            transcriptionCardsStack.addArrangedSubview(statusCard("Ollama", "未检测到转录模型", "参数：-", "架构：-", "厂家：Ollama"))
+            transcriptionCardsStack.addArrangedSubview(statusCard(
+                t("card.ollama"),
+                t("card.noTranscription"),
+                "-",
+                "-",
+                "Ollama"
+            ))
         } else {
             for model in currentTranscriptionModels {
-                let suffix = model.needsTest ? "（需测试）" : ""
+                let suffix = model.needsTest ? t("card.needsTest") : ""
                 transcriptionCardsStack.addArrangedSubview(cardButton(
-                    source: "Ollama",
+                    source: t("card.ollama"),
                     title: "\(model.name)\(suffix)",
                     parameter: parameterText(for: model),
                     architecture: architectureText(for: model),
@@ -607,9 +742,9 @@ final class CodexVoicePanelController: NSViewController {
             }
         }
         transcriptionCardsStack.addArrangedSubview(cardButton(
-            source: "在线 API",
-            title: "OpenAI API（未启用）",
-            parameter: "云端",
+            source: t("card.onlineAPI"),
+            title: t("card.openaiDisabled"),
+            parameter: t("card.cloud"),
             architecture: "Audio API",
             vendor: "OpenAI",
             value: "external:openai-transcription",
@@ -625,10 +760,10 @@ final class CodexVoicePanelController: NSViewController {
         let profile = correctionProfile()
         let selectedOllama = stringConfig("ollama_model", defaultValue: "")
         correctionCardsStack.addArrangedSubview(cardButton(
-            source: "内置",
-            title: "规则纠错（不使用 LLM）",
+            source: t("card.builtin"),
+            title: t("card.ruleCorrection"),
             parameter: "0",
-            architecture: "规则引擎",
+            architecture: t("card.ruleEngine"),
             vendor: "Codex Voice",
             value: "profile:rule-only",
             selected: profile == "rule-only",
@@ -636,20 +771,26 @@ final class CodexVoicePanelController: NSViewController {
         ))
 
         if scanningModels {
-            correctionCardsStack.addArrangedSubview(statusCard("Ollama", "正在扫描", "参数：-", "架构：-", "厂家：Ollama"))
+            correctionCardsStack.addArrangedSubview(statusCard(
+                t("card.ollama"),
+                t("card.scanning"),
+                "-",
+                "-",
+                "Ollama"
+            ))
         } else if currentCorrectionModels.isEmpty {
             correctionCardsStack.addArrangedSubview(statusCard(
-                "Ollama",
+                t("card.ollama"),
                 ollamaEmptyCorrectionTitle(selectedModel: selectedOllama),
-                "参数：\(ollamaStatusParameter())",
-                "架构：\(currentMaintenance.ollamaStatus)",
-                "厂家：Ollama"
+                ollamaStatusParameter(),
+                currentMaintenance.ollamaStatus,
+                "Ollama"
             ))
         } else {
             for model in currentCorrectionModels {
-                let suffix = model.loaded ? "" : "（待加载）"
+                let suffix = model.loaded ? "" : t("card.notLoaded")
                 correctionCardsStack.addArrangedSubview(cardButton(
-                    source: "Ollama",
+                    source: t("card.ollama"),
                     title: "\(model.name)\(suffix)",
                     parameter: parameterText(for: model),
                     architecture: architectureText(for: model),
@@ -663,9 +804,9 @@ final class CodexVoicePanelController: NSViewController {
             }
         }
         correctionCardsStack.addArrangedSubview(cardButton(
-            source: "在线 API",
-            title: "OpenAI API（未启用）",
-            parameter: "云端",
+            source: t("card.onlineAPI"),
+            title: t("card.openaiDisabled"),
+            parameter: t("card.cloud"),
             architecture: "Chat API",
             vendor: "OpenAI",
             value: "external:openai-correction",
@@ -678,16 +819,16 @@ final class CodexVoicePanelController: NSViewController {
     private func ollamaEmptyCorrectionTitle(selectedModel: String) -> String {
         switch currentMaintenance.ollamaStatusCode {
         case "ollama_not_installed":
-            return "未检测到纠错模型"
+            return t("card.noCorrection")
         case "service_unavailable":
-            return "Ollama 服务未就绪"
+            return t("card.ollamaNotReady")
         case "starting":
-            return "正在启动 Ollama"
+            return t("card.startingOllama")
         default:
             if !selectedModel.isEmpty {
-                return "未安装 \(selectedModel)"
+                return t("card.notInstalled", ["model": selectedModel])
             }
-            return "无可用纠错模型"
+            return t("card.noAvailableCorrection")
         }
     }
 
@@ -702,16 +843,16 @@ final class CodexVoicePanelController: NSViewController {
         let defaultName = currentInputDevices.first(where: { $0.isDefault })?.name
         let defaultTitle: String
         if let defaultName, !defaultName.isEmpty {
-            defaultTitle = "系统默认输入（\(defaultName)）"
+            defaultTitle = t("card.systemDefaultInputNamed", ["name": defaultName])
         } else {
-            defaultTitle = "系统默认输入"
+            defaultTitle = t("card.systemDefaultInput")
         }
         inputCardsStack.addArrangedSubview(cardButton(
-            source: "默认",
+            source: t("card.default"),
             title: defaultTitle,
-            parameter: "自动",
-            architecture: "CoreAudio",
-            vendor: "macOS",
+            parameter: t("card.auto"),
+            architecture: t("card.coreAudio"),
+            vendor: t("card.macOS"),
             value: "__default__",
             selected: configured == nil || configured?.isEmpty == true,
             action: #selector(inputChoiceClicked(_:)),
@@ -719,25 +860,27 @@ final class CodexVoicePanelController: NSViewController {
         ))
 
         if currentInputDevices.isEmpty {
-            let title = scanningModels ? "正在扫描输入设备" : "未检测到可用麦克风"
+            let title = scanningModels ? t("card.scanningInput") : t("card.noMicrophone")
             inputCardsStack.addArrangedSubview(statusCard(
-                "输入",
+                t("card.input"),
                 title,
-                "参数：-",
-                "架构：CoreAudio",
-                "厂家：macOS",
+                "-",
+                t("card.coreAudio"),
+                t("card.macOS"),
                 width: Metrics.inputCardWidth
             ))
         } else {
             for device in currentInputDevices {
-                let title = device.isDefault ? "\(device.name)（当前系统默认）" : device.name
-                let channels = device.channels.map { "\($0) ch" } ?? "未知"
+                let title = device.isDefault
+                    ? "\(device.name) \(t("menu.currentSystemDefault"))"
+                    : device.name
+                let channels = device.channels.map { "\($0) ch" } ?? t("card.unknown")
                 inputCardsStack.addArrangedSubview(cardButton(
-                    source: "麦克风",
+                    source: t("card.microphone"),
                     title: title,
                     parameter: channels,
-                    architecture: "CoreAudio 输入",
-                    vendor: device.isDefault ? "macOS 默认" : "音频设备",
+                    architecture: t("card.coreAudioInput"),
+                    vendor: device.isDefault ? t("card.macOSDefault") : t("card.audioDevice"),
                     value: device.name,
                     selected: configured == device.name,
                     action: #selector(inputChoiceClicked(_:)),
@@ -748,12 +891,15 @@ final class CodexVoicePanelController: NSViewController {
     }
 
     private func refreshInputProbeArea() {
-        probeButton.title = inputProbeInFlight ? "测试中" : "测试输入"
+        probeButton.title = inputProbeInFlight ? t("panel.testing") : t("panel.testInput")
         probeButton.isEnabled = !inputProbeInFlight
-        setText(probeResultLabel, currentInputProbeResult)
+        setText(
+            probeResultLabel,
+            currentInputProbeResult.isEmpty ? t("panel.notTested") : currentInputProbeResult
+        )
 
         let minutes = currentMaxRecordingMinutes()
-        setText(maxMinutesLabel, "录音上限：\(Int(minutes)) 分钟")
+        setText(maxMinutesLabel, t("panel.maxMinutes", ["minutes": "\(Int(minutes))"]))
         if maxMinutesStepper.doubleValue != minutes {
             maxMinutesStepper.doubleValue = minutes
         }
@@ -820,7 +966,7 @@ final class CodexVoicePanelController: NSViewController {
             guard let card = view as? CardChoiceView else {
                 continue
             }
-            card.setLoadingTask(card.isSelectedCard ? task : nil)
+            card.setLoadingTask(card.isSelectedCard ? task : nil, config: currentConfig)
         }
     }
 
@@ -937,9 +1083,9 @@ final class CodexVoicePanelController: NSViewController {
             source: source,
             title: title,
             rows: [
-                ("参数", parameter),
-                ("架构", architecture),
-                ("厂家", vendor)
+                (t("card.parameter"), parameter),
+                (t("card.architecture"), architecture),
+                (t("card.vendor"), vendor)
             ],
             selected: selected,
             enabled: enabled,
@@ -959,18 +1105,18 @@ final class CodexVoicePanelController: NSViewController {
     private func statusCard(
         _ source: String,
         _ title: String,
-        _ parameterLine: String,
-        _ architectureLine: String,
-        _ vendorLine: String,
+        _ parameter: String,
+        _ architecture: String,
+        _ vendor: String,
         width: CGFloat = Metrics.modelCardWidth
     ) -> NSView {
         return CardChoiceView(
             source: source,
             title: title,
             rows: [
-                ("参数", parameterLine.replacingOccurrences(of: "参数：", with: "")),
-                ("架构", architectureLine.replacingOccurrences(of: "架构：", with: "")),
-                ("厂家", vendorLine.replacingOccurrences(of: "厂家：", with: ""))
+                (t("card.parameter"), parameter),
+                (t("card.architecture"), architecture),
+                (t("card.vendor"), vendor)
             ],
             selected: false,
             enabled: false,
@@ -1012,7 +1158,7 @@ final class CodexVoicePanelController: NSViewController {
         if !model.parameterSize.isEmpty {
             return model.parameterSize
         }
-        return "未知"
+        return t("card.unknown")
     }
 
     private func architectureText(for model: OllamaModel) -> String {
@@ -1038,7 +1184,7 @@ final class CodexVoicePanelController: NSViewController {
         if text.contains("mistral") { return "Mistral AI" }
         if text.contains("deepseek") { return "DeepSeek" }
         if text.contains("phi") { return "Microsoft" }
-        if text.contains("whisper") { return "OpenAI / 社区" }
+        if text.contains("whisper") { return "OpenAI / Community" }
         if text.contains("yi") { return "01.AI" }
         if text.contains("baichuan") { return "Baichuan" }
         return "Ollama"
@@ -1091,10 +1237,9 @@ final class CodexVoicePanelController: NSViewController {
         return row
     }
 
-    private func routeRow(_ name: String, _ valueLabel: NSTextField) -> NSView {
+    private func routeRow(_ nameLabel: NSTextField, _ valueLabel: NSTextField) -> NSView {
         let row = horizontalStack(spacing: 3)
         row.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
-        let nameLabel = NSTextField(labelWithString: "\(name)：")
         nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         nameLabel.textColor = .secondaryLabelColor
         nameLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -1110,7 +1255,7 @@ final class CodexVoicePanelController: NSViewController {
     private func infoLine(_ name: String, _ valueLabel: NSTextField) -> NSView {
         let row = horizontalStack(spacing: 8)
         row.widthAnchor.constraint(equalToConstant: Metrics.tabInnerWidth).isActive = true
-        let nameLabel = NSTextField(labelWithString: "\(name)：")
+        let nameLabel = NSTextField(labelWithString: "\(name):")
         nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         nameLabel.widthAnchor.constraint(equalToConstant: Metrics.maintenanceLabelWidth).isActive = true
         valueLabel.font = NSFont.systemFont(ofSize: 11)
@@ -1139,11 +1284,17 @@ final class CodexVoicePanelController: NSViewController {
 
     private func compactButton(_ title: String, _ action: Selector, width: CGFloat) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
+        configureCompactButton(button, action: action, width: width)
+        return button
+    }
+
+    private func configureCompactButton(_ button: NSButton, action: Selector, width: CGFloat) {
+        button.target = self
+        button.action = action
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = NSFont.systemFont(ofSize: 11)
         button.widthAnchor.constraint(equalToConstant: width).isActive = true
-        return button
     }
 
     private func configureSettingsButton() {
@@ -1151,13 +1302,12 @@ final class CodexVoicePanelController: NSViewController {
         settingsButton.action = #selector(settingsClicked(_:))
         settingsButton.isBordered = false
         settingsButton.imagePosition = .imageOnly
-        settingsButton.toolTip = "设置"
         settingsButton.widthAnchor.constraint(equalToConstant: 20).isActive = true
         settingsButton.heightAnchor.constraint(equalToConstant: 20).isActive = true
         if #available(macOS 11.0, *) {
             settingsButton.image = NSImage(
                 systemSymbolName: "gearshape",
-                accessibilityDescription: "设置"
+                accessibilityDescription: "Settings"
             )
             settingsButton.contentTintColor = .secondaryLabelColor
         } else {
@@ -1190,10 +1340,13 @@ final class CodexVoicePanelController: NSViewController {
 
         stack.addArrangedSubview(makeSettingsHeader())
         stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(settingsSectionLabel("权限"))
+        stack.addArrangedSubview(configureSettingsSectionLabel(languageSectionLabel))
+        stack.addArrangedSubview(makeLanguageSettingsRow())
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(configureSettingsSectionLabel(permissionsSectionLabel))
         stack.addArrangedSubview(makePermissionSettingsRow())
         stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(settingsSectionLabel("快捷键"))
+        stack.addArrangedSubview(configureSettingsSectionLabel(hotkeySectionLabel))
         stack.addArrangedSubview(makeHotkeyRow())
     }
 
@@ -1201,23 +1354,21 @@ final class CodexVoicePanelController: NSViewController {
         let row = horizontalStack(spacing: 8)
         row.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
 
-        let title = NSTextField(labelWithString: "设置")
-        title.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
-        title.textColor = .labelColor
-        row.addArrangedSubview(title)
+        settingsTitleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        settingsTitleLabel.textColor = .labelColor
+        row.addArrangedSubview(settingsTitleLabel)
         row.addArrangedSubview(makeFlexibleSpacer())
 
         settingsCloseButton.target = self
         settingsCloseButton.action = #selector(settingsCloseClicked(_:))
         settingsCloseButton.isBordered = false
         settingsCloseButton.imagePosition = .imageOnly
-        settingsCloseButton.toolTip = "关闭设置"
         settingsCloseButton.widthAnchor.constraint(equalToConstant: 22).isActive = true
         settingsCloseButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
         if #available(macOS 11.0, *) {
             settingsCloseButton.image = NSImage(
                 systemSymbolName: "xmark.circle.fill",
-                accessibilityDescription: "关闭设置"
+                accessibilityDescription: "Close settings"
             )
             settingsCloseButton.contentTintColor = .secondaryLabelColor
         } else {
@@ -1228,8 +1379,7 @@ final class CodexVoicePanelController: NSViewController {
         return row
     }
 
-    private func settingsSectionLabel(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
+    private func configureSettingsSectionLabel(_ label: NSTextField) -> NSTextField {
         label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         label.textColor = .secondaryLabelColor
         label.widthAnchor.constraint(equalToConstant: Metrics.contentWidth).isActive = true
@@ -1239,10 +1389,22 @@ final class CodexVoicePanelController: NSViewController {
     private func configureHotkeyButton(_ button: NSButton, action: Selector, width: CGFloat) {
         button.target = self
         button.action = action
+        configureAdaptiveTextButton(button, minWidth: width, fontSize: 11)
+    }
+
+    private func configureAdaptiveTextButton(
+        _ button: NSButton,
+        minWidth: CGFloat,
+        fontSize: CGFloat? = nil
+    ) {
         button.bezelStyle = .rounded
         button.controlSize = .small
-        button.font = NSFont.systemFont(ofSize: 11)
-        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        if let fontSize {
+            button.font = NSFont.systemFont(ofSize: fontSize)
+        }
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: minWidth).isActive = true
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
     private func configureIndicatorButton() {
@@ -1251,14 +1413,13 @@ final class CodexVoicePanelController: NSViewController {
         indicatorButton.bezelStyle = .rounded
         indicatorButton.controlSize = .small
         indicatorButton.imagePosition = .imageOnly
-        indicatorButton.toolTip = "显示或隐藏录音浮窗"
         if #available(macOS 11.0, *) {
             indicatorButton.image = NSImage(
                 systemSymbolName: "macwindow",
-                accessibilityDescription: "浮窗"
+                accessibilityDescription: "Recording indicator"
             ) ?? NSImage(
                 systemSymbolName: "rectangle",
-                accessibilityDescription: "浮窗"
+                accessibilityDescription: "Recording indicator"
             )
         } else {
             indicatorButton.title = "□"
@@ -1368,6 +1529,44 @@ final class CodexVoicePanelController: NSViewController {
         }
     }
 
+    private func t(_ key: String, _ args: [String: String] = [:]) -> String {
+        CodexVoiceI18n.text(key, config: currentConfig, args)
+    }
+
+    private func localizedStatusLabel(_ status: VoiceStatus) -> String {
+        let key = status.labelKey.isEmpty ? "status.\(status.status)" : status.labelKey
+        return CodexVoiceI18n.text(key, config: currentConfig)
+    }
+
+    private func localizedStatusDetail(_ status: VoiceStatus) -> String {
+        if !status.detailKey.isEmpty {
+            return CodexVoiceI18n.text(status.detailKey, config: currentConfig, status.detailArgs)
+        }
+        if !status.detail.isEmpty {
+            return status.detail
+        }
+        return localizedStatusLabel(status)
+    }
+
+    private func localizedNativeHotkeyStatus(_ status: String) -> String {
+        if status.isEmpty || status == "unregistered" {
+            return ""
+        }
+        if status == "registered" {
+            return t("panel.hotkeyRegistered")
+        }
+        if status == "disabled" {
+            return t("panel.hotkeyDisabled")
+        }
+        if status == "unavailable" || status == "rejected" {
+            return t("panel.hotkeyUnavailable")
+        }
+        if status.hasPrefix("conflict:") {
+            return t("panel.hotkeyMaybeConflict", ["status": String(status.dropFirst("conflict:".count))])
+        }
+        return status
+    }
+
     private func setProgress(value: Double?, indeterminate: Bool) {
         modelProgress.isHidden = false
         if indeterminate {
@@ -1474,7 +1673,7 @@ final class CodexVoicePanelController: NSViewController {
             return "faster-whisper large-v3-turbo"
         case "ollama-transcription":
             let model = stringConfig("ollama_transcription_model", defaultValue: "")
-            return model.isEmpty ? "Ollama 转录模型未选择" : "Ollama · \(model)"
+            return model.isEmpty ? t("label.ollamaTranscriptionMissing") : "Ollama · \(model)"
         default:
             let backend = stringConfig("whisper_backend", defaultValue: "mlx-whisper")
             let model = stringConfig("whisper_model", defaultValue: "")
@@ -1485,12 +1684,12 @@ final class CodexVoicePanelController: NSViewController {
     private func correctionLabel() -> String {
         switch correctionProfile() {
         case "rule-only":
-            return "规则纠错"
+            return t("label.ruleCorrection")
         case "ollama-correction":
             let model = stringConfig("ollama_model", defaultValue: "")
-            return model.isEmpty ? "Ollama 纠错模型未选择" : "Ollama · \(model)"
+            return model.isEmpty ? t("label.ollamaCorrectionMissing") : "Ollama · \(model)"
         default:
-            return stringConfig("correction_backend", defaultValue: "规则纠错")
+            return stringConfig("correction_backend", defaultValue: t("label.ruleCorrection"))
         }
     }
 
@@ -1500,9 +1699,9 @@ final class CodexVoicePanelController: NSViewController {
         }
         if let defaultName = currentInputDevices.first(where: { $0.isDefault })?.name,
            !defaultName.isEmpty {
-            return "系统默认输入（\(defaultName)）"
+            return t("label.systemDefaultInputNamed", ["name": defaultName])
         }
-        return "系统默认输入"
+        return t("label.systemDefaultInput")
     }
 
     private func configBool(_ key: String, defaultValue: Bool) -> Bool {
@@ -1597,13 +1796,13 @@ final class CodexVoicePanelController: NSViewController {
         }
         guard let hotkey = NativeHotkey.from(event: event) else {
             hotkeyValueLabel.textColor = .systemRed
-            setText(hotkeyValueLabel, "请按组合键")
+            setText(hotkeyValueLabel, t("panel.pressCombination"))
             return
         }
         if let status = NativeHotkeyConflictChecker.publicAPIStatus(for: hotkey),
            status != noErr {
             hotkeyValueLabel.textColor = .systemRed
-            setText(hotkeyValueLabel, "快捷键不可用或已被占用")
+            setText(hotkeyValueLabel, t("panel.hotkeyRejected"))
             return
         }
         stopHotkeyRecording()
@@ -1634,7 +1833,10 @@ final class CodexVoicePanelController: NSViewController {
                 hotkeyRecordingModifier = modifier
                 hotkeyRecordingLastTapTime = now
                 hotkeyValueLabel.textColor = .systemYellow
-                setText(hotkeyValueLabel, "再按一次 \(NativeHotkey.displayModifier(modifier))")
+                setText(
+                    hotkeyValueLabel,
+                    t("panel.pressAgain", ["key": NativeHotkey.displayModifier(modifier)])
+                )
             }
             hotkeyRecordingModifierIsDown = true
         } else if !isDown {
@@ -1746,13 +1948,20 @@ final class CodexVoicePanelController: NSViewController {
     }
 
     @objc private func maxMinutesChanged(_ sender: NSStepper) {
-        setText(maxMinutesLabel, "录音上限：\(Int(sender.doubleValue)) 分钟")
+        setText(maxMinutesLabel, t("panel.maxMinutes", ["minutes": "\(Int(sender.doubleValue))"]))
         onSetMaxMinutes?(sender.doubleValue)
     }
 
     @objc private func maxMinutesPopupChanged(_ sender: NSPopUpButton) {
         let minutes = Double(max(1, sender.indexOfSelectedItem + 1))
         onSetMaxMinutes?(minutes)
+    }
+
+    @objc private func languagePopupChanged(_ sender: NSPopUpButton) {
+        guard let language = sender.selectedItem?.representedObject as? String else {
+            return
+        }
+        onSetUILanguage?(language)
     }
 
     @objc private func microphoneClicked(_ sender: Any?) {

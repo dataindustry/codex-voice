@@ -42,12 +42,12 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastAutoPrepareFailureAt: Date?
     private var lastAutoPrepareFailureModel = ""
     private var quitInProgress = false
-    private var lastInputProbeResult = "未测试"
+    private var lastInputProbeResult = ""
     private var isPanelScanInFlight = false
     private var isInputProbeInFlight = false
     private var timer: Timer?
     private let nativeHotkeyManager = NativeHotkeyManager()
-    private var nativeHotkeyStatus = "未注册"
+    private var nativeHotkeyStatus = "unregistered"
     private var lastNativeHotkeyAcceptedAt: Date?
     private var lastNativeRecordingStartAt: Date?
     private let nativeHotkeyDebounceInterval: TimeInterval = 0.35
@@ -163,6 +163,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.onResetNativeHotkey = { [weak self] in
             self?.resetNativeHotkey()
         }
+        controller.onSetUILanguage = { [weak self] language in
+            self?.setUILanguage(language)
+        }
         panelController = controller
 
         let popover = NSPopover()
@@ -237,6 +240,14 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    private func i18n(_ key: String, _ args: [String: String] = [:]) -> String {
+        CodexVoiceI18n.text(key, config: readConfig(), args)
+    }
+
+    private func i18n(_ key: String, config: [String: Any], _ args: [String: String] = [:]) -> String {
+        CodexVoiceI18n.text(key, config: config, args)
+    }
+
     private func updateStatus() {
         let voiceStatus = readStatus()
         let color = colorForStatus(voiceStatus.status, stale: voiceStatus.isStale)
@@ -251,14 +262,17 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         statusItem?.button?.toolTip = tooltipForStatus(voiceStatus)
 
-        statusLine?.title = "状态: \(voiceStatus.label)"
+        let config = readConfig()
+        statusLine?.title = i18n("menu.status", config: config, ["value": voiceStatus.label])
         detailLine?.title = detailForMenu(voiceStatus)
 
         let canControlRecording = voiceStatus.status == "recording" || voiceStatus.status == "submitting"
         let busyAfterRecording = voiceStatus.status == "transcribing"
             || voiceStatus.status == "correcting"
             || voiceStatus.status == "finalizing"
-        toggleItem?.title = canControlRecording ? "提交当前录音" : "开始录音"
+        toggleItem?.title = canControlRecording
+            ? i18n("menu.submitCurrent", config: config)
+            : i18n("menu.start", config: config)
         toggleItem?.isEnabled = !busyAfterRecording
         submitItem?.isEnabled = canControlRecording
         cancelItem?.isEnabled = canControlRecording
@@ -285,7 +299,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let maintenance = cachedMaintenance ?? PanelMaintenance(
             pythonPath: pythonPath,
             launchAgentStatus: "com.codexvoice.agent",
-            ollamaStatus: "正在扫描",
+            ollamaStatus: i18n("maintenance.scanning", config: config),
             ollamaStatusCode: "scanning",
             ollamaBaseURL: ""
         )
@@ -296,7 +310,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             inputDevices: cachedInputDevices,
             transcriptionModels: cachedTranscriptionModels,
             correctionModels: cachedCorrectionModels,
-            inputProbeResult: lastInputProbeResult,
+            inputProbeResult: lastInputProbeResult.isEmpty
+                ? i18n("panel.notTested", config: config)
+                : lastInputProbeResult,
             isInputProbeInFlight: isInputProbeInFlight,
             isScanningModels: isPanelScanInFlight,
             maintenance: maintenance,
@@ -315,20 +331,25 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isPanelScanInFlight = true
         refreshPanel()
         DispatchQueue.global(qos: .utility).async {
+            let config = self.readConfig()
             let devices = self.readInputDevices()
             let scan = self.readOllamaScan()
             let launchStatus = self.readLaunchAgentSummary()
             let ollamaStatus: String
             if scan.available {
-                ollamaStatus = scan.baseURL.isEmpty ? "可用" : "可用：\(scan.baseURL)"
+                ollamaStatus = scan.baseURL.isEmpty
+                    ? self.i18n("maintenance.available", config: config)
+                    : self.i18n("maintenance.availableAt", config: config, ["url": scan.baseURL])
             } else if scan.status == "ollama_not_installed" {
-                ollamaStatus = "Ollama 未安装"
+                ollamaStatus = self.i18n("maintenance.ollamaNotInstalled", config: config)
             } else if scan.status == "service_unavailable" {
-                ollamaStatus = scan.error.isEmpty ? "服务未就绪" : "服务未就绪：\(scan.error)"
+                ollamaStatus = scan.error.isEmpty
+                    ? self.i18n("maintenance.serviceNotReady", config: config)
+                    : self.i18n("maintenance.serviceNotReadyDetail", config: config, ["error": scan.error])
             } else if scan.error.isEmpty {
-                ollamaStatus = "不可用"
+                ollamaStatus = self.i18n("maintenance.unavailable", config: config)
             } else {
-                ollamaStatus = "不可用：\(scan.error)"
+                ollamaStatus = self.i18n("maintenance.unavailableDetail", config: config, ["error": scan.error])
             }
             let maintenance = PanelMaintenance(
                 pythonPath: self.pythonPath,
@@ -350,9 +371,13 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func readStatus() -> VoiceStatus {
+        let config = readConfig()
         let defaultStatus = VoiceStatus(
             status: "idle",
-            label: "空闲",
+            labelKey: "status.idle",
+            label: CodexVoiceI18n.text("status.idle", config: config),
+            detailKey: "",
+            detailArgs: [:],
             detail: "",
             pid: nil,
             updatedAt: "",
@@ -367,7 +392,10 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let status = dict["status"] as? String ?? "idle"
-        let label = dict["label"] as? String ?? fallbackLabel(status)
+        let labelKey = dict["label_key"] as? String ?? "status.\(status)"
+        let label = CodexVoiceI18n.text(labelKey, config: config)
+        let detailKey = dict["detail_key"] as? String ?? ""
+        let detailArgs = stringDictionary(dict["detail_args"])
         let detail = dict["detail"] as? String ?? ""
         let pid = dict["pid"] as? Int
         let updatedAt = dict["updated_at"] as? String ?? ""
@@ -376,8 +404,11 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if isStale {
             return VoiceStatus(
                 status: "idle",
-                label: "空闲",
-                detail: "状态文件已过期，可能是上次进程异常退出",
+                labelKey: "status.idle",
+                label: CodexVoiceI18n.text("status.idle", config: config),
+                detailKey: "detail.stale",
+                detailArgs: [:],
+                detail: CodexVoiceI18n.text("detail.stale", config: config),
                 pid: nil,
                 updatedAt: updatedAt,
                 isStale: true
@@ -386,8 +417,11 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         return VoiceStatus(
             status: status,
+            labelKey: labelKey,
             label: label,
-            detail: detail,
+            detailKey: detailKey,
+            detailArgs: detailArgs,
+            detail: detailKey.isEmpty ? detail : CodexVoiceI18n.text(detailKey, config: config, detailArgs),
             pid: pid,
             updatedAt: updatedAt,
             isStale: false
@@ -402,16 +436,15 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return Date().timeIntervalSince(modified) > 20 * 60
     }
 
-    private func fallbackLabel(_ status: String) -> String {
-        switch status {
-        case "recording": return "正在录音"
-        case "submitting": return "正在结束录音"
-        case "transcribing": return "正在识别"
-        case "correcting": return "正在纠错"
-        case "finalizing": return "正在提交文本"
-        case "error": return "出错"
-        default: return "空闲"
+    private func stringDictionary(_ value: Any?) -> [String: String] {
+        guard let dict = value as? [String: Any] else {
+            return [:]
         }
+        var result: [String: String] = [:]
+        for (key, value) in dict {
+            result[key] = "\(value)"
+        }
+        return result
     }
 
     private func titleForStatus(_ status: String, stale: Bool) -> String {
@@ -532,6 +565,10 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             config["native_hotkey"] = NativeHotkey.defaultHotkey.configValue
             changed = true
         }
+        if config["ui_language"] == nil {
+            config["ui_language"] = "system"
+            changed = true
+        }
         if changed {
             _ = writeConfig(config)
         }
@@ -543,7 +580,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hotkey = NativeHotkey.from(config: config)
         guard enabled else {
             nativeHotkeyManager.unregister()
-            nativeHotkeyStatus = "已关闭"
+            nativeHotkeyStatus = "disabled"
             appendLog("Native hotkey disabled")
             refreshPanel()
             return
@@ -553,10 +590,10 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.nativeHotkeyPressed()
         }
         if status == noErr {
-            nativeHotkeyStatus = "已注册"
+            nativeHotkeyStatus = "registered"
             appendLog("Registered native hotkey: \(hotkey.displayName)")
         } else {
-            nativeHotkeyStatus = "快捷键不可用/可能冲突 (\(status))"
+            nativeHotkeyStatus = "conflict:\(status)"
             appendLog("Could not register native hotkey \(hotkey.displayName): \(status)")
         }
         refreshPanel()
@@ -570,7 +607,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if let status = NativeHotkeyConflictChecker.publicAPIStatus(for: hotkey),
            status != noErr {
-            nativeHotkeyStatus = "快捷键不可用或已被占用"
+            nativeHotkeyStatus = "unavailable"
             appendLog("Rejected native hotkey \(hotkey.displayName): public API status \(status)")
             refreshPanel()
             return
@@ -595,7 +632,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         nativeHotkeyManager.unregister()
-        nativeHotkeyStatus = "已关闭"
+        nativeHotkeyStatus = "disabled"
         appendLog("Cleared native hotkey")
         refreshPanel()
     }
@@ -648,18 +685,18 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         popover?.close()
+        let config = readConfig()
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "退出 Codex Voice Agent？"
-        alert.informativeText = """
-        当前 Ollama 已加载模型：
-        \(loadedModels.map { "• \($0)" }.joined(separator: "\n"))
-
-        是否在退出 Agent 前同时卸载这些模型以释放内存？
-        """
-        alert.addButton(withTitle: "退出并卸载模型")
-        alert.addButton(withTitle: "仅退出")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = i18n("alert.quitTitle", config: config)
+        alert.informativeText = i18n(
+            "alert.loadedModels",
+            config: config,
+            ["models": loadedModels.map { "• \($0)" }.joined(separator: "\n")]
+        )
+        alert.addButton(withTitle: i18n("alert.unloadAndQuit", config: config))
+        alert.addButton(withTitle: i18n("alert.quitOnly", config: config))
+        alert.addButton(withTitle: i18n("alert.cancel", config: config))
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -678,12 +715,13 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         popover?.close()
+        let config = readConfig()
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "正在录音，要退出吗？"
-        alert.informativeText = "退出 Codex Voice Agent 前需要先取消当前录音，否则后台录音进程可能继续占用麦克风。"
-        alert.addButton(withTitle: "取消录音并退出")
-        alert.addButton(withTitle: "继续录音")
+        alert.messageText = i18n("alert.recordingQuitTitle", config: config)
+        alert.informativeText = i18n("alert.recordingQuitInfo", config: config)
+        alert.addButton(withTitle: i18n("alert.cancelRecordingAndQuit", config: config))
+        alert.addButton(withTitle: i18n("alert.continueRecording", config: config))
 
         guard alert.runModal() == .alertFirstButtonReturn else {
             return false
@@ -763,14 +801,14 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if granted {
                         self.runInputProbeForPanel()
                     } else {
-                        self.lastInputProbeResult = "麦克风权限未允许"
+                        self.lastInputProbeResult = self.i18n("menu.noMicrophone")
                         self.refreshPanel()
                     }
                 }
             }
         case .denied, .restricted:
             appendLog("Microphone permission denied or restricted; opening Microphone privacy settings")
-            lastInputProbeResult = "麦克风权限被拒绝，请在系统设置中允许"
+            lastInputProbeResult = i18n("menu.noMicrophone")
             refreshPanel()
             runProcess(
                 "/usr/bin/open",
@@ -787,7 +825,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         isInputProbeInFlight = true
-        lastInputProbeResult = "测试中..."
+        lastInputProbeResult = i18n("panel.testing")
         refreshPanel()
         DispatchQueue.global(qos: .utility).async {
             let result = self.runProcessAndCapture(
@@ -805,27 +843,39 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func inputProbeSummary(exitCode: Int32, output: String) -> String {
+        let config = readConfig()
         if exitCode != 0 {
-            return output.isEmpty ? "测试失败" : "测试失败：\(output)"
+            return output.isEmpty
+                ? i18n("panel.testFailed", config: config)
+                : "\(i18n("panel.testFailed", config: config)): \(output)"
         }
         guard let data = output.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
               let dict = object as? [String: Any] else {
-            return output.isEmpty ? "测试完成" : output
+            return output.isEmpty ? i18n("panel.testDone", config: config) : output
         }
         let rms = (dict["rms"] as? NSNumber)?.doubleValue ?? 0
         let peak = (dict["peak"] as? NSNumber)?.doubleValue ?? 0
         let device = dict["device"] ?? "system default"
-        let overflowed = (dict["overflowed"] as? Bool) == true ? "，有溢出" : ""
+        let overflowed = (dict["overflowed"] as? Bool) == true
+            ? i18n("panel.overflow", config: config)
+            : ""
         if rms == 0 && peak == 0 {
-            return "当前输入无信号：设备 \(device)，请检查输入设备"
+            return i18n(
+                "panel.selectedInputNoSignal",
+                config: config,
+                ["device": "\(device)"]
+            )
         }
-        return String(
-            format: "设备 %@，RMS %.4f，Peak %.4f%@",
-            "\(device)",
-            rms,
-            peak,
-            overflowed
+        return i18n(
+            "panel.inputSummary",
+            config: config,
+            [
+                "device": "\(device)",
+                "rms": String(format: "%.4f", rms),
+                "peak": String(format: "%.4f", peak),
+                "overflow": overflowed
+            ]
         )
     }
 
@@ -868,9 +918,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         appendModelTaskMenuItems(menu, scope: "transcription")
 
-        menu.addItem(disabledMenuItem("内置转录模型"))
+        menu.addItem(disabledMenuItem(i18n("menu.builtinTranscription", config: config)))
         let mlxItem = actionMenuItem(
-            "MLX Whisper large-v3-turbo（推荐）",
+            "MLX Whisper large-v3-turbo \(i18n("menu.recommended", config: config))",
             #selector(selectTranscriptionModel(_:))
         )
         mlxItem.representedObject = "profile:mlx-whisper-turbo"
@@ -878,7 +928,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(mlxItem)
 
         let fasterItem = actionMenuItem(
-            "faster-whisper large-v3-turbo（兼容）",
+            "faster-whisper large-v3-turbo \(i18n("menu.compatible", config: config))",
             #selector(selectTranscriptionModel(_:))
         )
         fasterItem.representedObject = "profile:faster-whisper-turbo"
@@ -886,15 +936,15 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(fasterItem)
 
         menu.addItem(.separator())
-        menu.addItem(disabledMenuItem("Ollama 已安装转录模型"))
+        menu.addItem(disabledMenuItem(i18n("menu.ollamaTranscription", config: config)))
         let ollamaModels = readOllamaTranscriptionModels()
         if ollamaModels.isEmpty {
-            menu.addItem(disabledMenuItem("未检测到 Ollama 转录模型"))
+            menu.addItem(disabledMenuItem(i18n("menu.noOllamaTranscription", config: config)))
         } else {
             for model in ollamaModels {
-                let suffix = model.needsTest ? "（需测试）" : ""
+                let suffix = model.needsTest ? i18n("menu.needsTest", config: config) : ""
                 let item = actionMenuItem(
-                    "\(model.name)\(suffix)",
+                    suffix.isEmpty ? model.name : "\(model.name) \(suffix)",
                     #selector(selectTranscriptionModel(_:))
                 )
                 item.representedObject = "ollama:\(model.name)"
@@ -906,8 +956,8 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        menu.addItem(disabledMenuItem("外接在线 API"))
-        menu.addItem(disabledMenuItem("OpenAI API（未启用）"))
+        menu.addItem(disabledMenuItem(i18n("menu.externalAPI", config: config)))
+        menu.addItem(disabledMenuItem(i18n("menu.openaiDisabled", config: config)))
     }
 
     private func currentCorrectionProfile(_ config: [String: Any]) -> String {
@@ -938,9 +988,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         appendModelTaskMenuItems(menu, scope: "correction")
 
-        menu.addItem(disabledMenuItem("内置纠错模型"))
+        menu.addItem(disabledMenuItem(i18n("menu.builtinCorrection", config: config)))
         let ruleItem = actionMenuItem(
-            "规则纠错（不使用 LLM）",
+            i18n("card.ruleCorrection", config: config),
             #selector(selectCorrectionModel(_:))
         )
         ruleItem.representedObject = "profile:rule-only"
@@ -948,10 +998,10 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(ruleItem)
 
         menu.addItem(.separator())
-        menu.addItem(disabledMenuItem("Ollama 已安装纠错模型"))
+        menu.addItem(disabledMenuItem(i18n("menu.ollamaCorrection", config: config)))
         let ollamaModels = readOllamaCorrectionModels()
         if ollamaModels.isEmpty {
-            menu.addItem(disabledMenuItem("未检测到 Ollama 纠错模型"))
+            menu.addItem(disabledMenuItem(i18n("menu.noOllamaCorrection", config: config)))
         } else {
             for model in ollamaModels {
                 let item = actionMenuItem(
@@ -967,8 +1017,8 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        menu.addItem(disabledMenuItem("外接在线 API"))
-        menu.addItem(disabledMenuItem("OpenAI API（未启用）"))
+        menu.addItem(disabledMenuItem(i18n("menu.externalAPI", config: config)))
+        menu.addItem(disabledMenuItem(i18n("menu.openaiDisabled", config: config)))
     }
 
     private func appendModelTaskMenuItems(_ menu: NSMenu, scope: String) {
@@ -993,7 +1043,8 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         title.lineBreakMode = .byTruncatingMiddle
         view.addSubview(title)
 
-        let detailText = task.detail.isEmpty ? "正在准备模型..." : task.detail
+        let config = readConfig()
+        let detailText = task.detail.isEmpty ? i18n("menu.modelPreparing", config: config) : task.detail
         let detail = NSTextField(labelWithString: detailText)
         detail.frame = NSRect(x: 12, y: 9, width: 256, height: 14)
         detail.font = NSFont.systemFont(ofSize: 11)
@@ -1025,11 +1076,33 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return nil
         }
 
+        let config = readConfig()
+        let labelKey = dict["label_key"] as? String ?? ""
+        let labelArgs = stringDictionary(dict["label_args"])
+        let detailKey = dict["detail_key"] as? String ?? ""
+        let detailArgs = stringDictionary(dict["detail_args"])
+        let fallbackLabel = dict["label"] as? String ?? "Model task"
+        let fallbackDetail = dict["detail"] as? String ?? ""
+
         return ModelTask(
             status: dict["status"] as? String ?? "idle",
             scope: dict["scope"] as? String ?? "",
-            label: dict["label"] as? String ?? "模型任务",
-            detail: dict["detail"] as? String ?? "",
+            labelKey: labelKey,
+            labelArgs: labelArgs,
+            label: CodexVoiceI18n.modelTaskText(
+                label: fallbackLabel,
+                key: labelKey,
+                args: labelArgs,
+                config: config
+            ),
+            detailKey: detailKey,
+            detailArgs: detailArgs,
+            detail: CodexVoiceI18n.modelTaskText(
+                label: fallbackDetail,
+                key: detailKey,
+                args: detailArgs,
+                config: config
+            ),
             progress: (dict["progress"] as? NSNumber)?.doubleValue,
             updatedAt: dict["updated_at"] as? String ?? ""
         )
@@ -1070,7 +1143,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return OllamaScan(
                 available: false,
                 status: "parse_error",
-                error: "模型扫描结果不可解析",
+                error: "Could not parse model scan result",
                 baseURL: "",
                 configuredCorrectionModel: "",
                 configuredCorrectionModelInstalled: false,
@@ -1187,10 +1260,11 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "/bin/launchctl",
             ["print", "gui/\(getuid())/\(label)"]
         )
+        let config = readConfig()
         if result.exitCode == 0 {
-            return "\(label)：已加载"
+            return i18n("maintenance.launchLoaded", config: config, ["label": label])
         }
-        return "\(label)：未加载"
+        return i18n("maintenance.launchNotLoaded", config: config, ["label": label])
     }
 
     @objc private func selectTranscriptionModel(_ sender: NSMenuItem) {
@@ -1310,9 +1384,9 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let defaultName = devices.first(where: { $0.isDefault })?.name
         let defaultTitle: String
         if let defaultName, !defaultName.isEmpty {
-            defaultTitle = "系统默认输入（\(defaultName)）"
+            defaultTitle = i18n("menu.systemDefaultInputNamed", config: config, ["name": defaultName])
         } else {
-            defaultTitle = "系统默认输入"
+            defaultTitle = i18n("menu.systemDefaultInput", config: config)
         }
         let defaultItem = actionMenuItem(defaultTitle, #selector(selectInputDevice(_:)))
         defaultItem.representedObject = "__default__"
@@ -1320,14 +1394,16 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(defaultItem)
 
         if devices.isEmpty {
-            let emptyItem = disabledMenuItem("未检测到可用麦克风")
+            let emptyItem = disabledMenuItem(i18n("menu.noMicrophone", config: config))
             menu.addItem(emptyItem)
             return
         }
 
         menu.addItem(.separator())
         for device in devices {
-            let title = device.isDefault ? "\(device.name)（当前系统默认）" : device.name
+            let title = device.isDefault
+                ? "\(device.name) \(i18n("menu.currentSystemDefault", config: config))"
+                : device.name
             let item = actionMenuItem(title, #selector(selectInputDevice(_:)))
             item.representedObject = device.name
             item.state = configured == device.name ? .on : .off
@@ -1392,6 +1468,24 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         appendLog("Set max recording minutes to \(formatted), exit=\(result.exitCode): \(result.output)")
         refreshPanel()
+    }
+
+    private func setUILanguage(_ language: String) {
+        let result = runProcessAndCapture(
+            pythonPath,
+            [configHelperPath, "--set-ui-language", language]
+        )
+        appendLog("Set UI language to \(language), exit=\(result.exitCode): \(result.output)")
+        if result.exitCode == 0 {
+            cachedMaintenance = nil
+            transcriptionModelMenu?.removeAllItems()
+            correctionModelMenu?.removeAllItems()
+            inputDeviceMenu?.removeAllItems()
+            updateStatus()
+            refreshPanelScanIfNeeded(force: true)
+        } else {
+            refreshPanel()
+        }
     }
 
     private func readConfig() -> [String: Any] {
@@ -1477,13 +1571,16 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let fallbackMax = readConfigDouble("max_record_seconds", defaultValue: 300)
         let maxSeconds = readConfigDouble("background_max_record_seconds", defaultValue: fallbackMax)
+        let language = CodexVoiceI18n.resolved(config: readConfig())
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = [
             "--parent-pid",
             "\(parentPID)",
             "--max-seconds",
-            "\(maxSeconds)"
+            "\(maxSeconds)",
+            "--language",
+            language
         ]
         process.currentDirectoryURL = URL(fileURLWithPath: root)
 
@@ -1520,7 +1617,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard requestAccessibilityPermission(prompt: true) else {
             return (
                 false,
-                "Codex Voice Agent 需要辅助功能权限才能发送 Cmd+V；请重新勾选辅助功能权限。"
+                i18n("paste.accessibility")
             )
         }
 

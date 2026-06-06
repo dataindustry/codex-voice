@@ -26,6 +26,16 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from codex_voice.i18n import (
+    build_correction_system_prompt,
+    build_correction_user_content,
+    build_initial_prompt_text,
+    normalize_output_text,
+    resolve_ui_language,
+    status_label,
+    t,
+    whisper_language,
+)
 from codex_voice.ollama import (
     DEFAULT_OLLAMA_NUM_CTX,
     ollama_base_url,
@@ -127,24 +137,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output_language": "zh-Hans+en",
     "force_simplified_chinese": True,
     "auto_paste": True,
+    "ui_language": "system",
     "config_version": 2,
     "save_recordings": False,
     "save_transcripts": True,
     "mode": "normal",
 }
-
-ACCESSIBILITY_REENABLE_MESSAGE = "已复制到剪贴板，请重新勾选辅助功能权限"
-
-STATUS_LABELS = {
-    "idle": "空闲",
-    "recording": "正在录音",
-    "submitting": "正在结束录音",
-    "transcribing": "正在识别",
-    "correcting": "正在纠错",
-    "finalizing": "正在提交文本",
-    "error": "出错",
-}
-
 
 class CodexVoiceError(Exception):
     """Base exception for expected operational failures."""
@@ -253,13 +251,19 @@ def write_status_state(
     logger: logging.Logger | None = None,
 ) -> None:
     ensure_dirs()
-    label = STATUS_LABELS.get(status, status)
+    try:
+        config = load_config()
+    except Exception:
+        config = DEFAULT_CONFIG
+    label_key = f"status.{status}"
+    label = status_label(config, status)
     if status == "idle" and pid is None:
         status_pid = None
     else:
         status_pid = pid if pid is not None else os.getpid()
     payload = {
         "status": status,
+        "label_key": label_key,
         "label": label,
         "detail": detail,
         "pid": status_pid,
@@ -326,6 +330,8 @@ def start_recording_indicator(
         str(os.getpid()),
         "--max-seconds",
         str(max_seconds),
+        "--language",
+        resolve_ui_language(config),
     ]
     try:
         with LOG_PATH.open("a", encoding="utf-8") as log_file:
@@ -478,9 +484,10 @@ def mark_recording_active(pid: int) -> None:
     ensure_dirs()
     PID_PATH.write_text(str(pid), encoding="utf-8")
     SUBMIT_REQUEST_PATH.unlink(missing_ok=True)
+    config = safe_message_config()
     write_status_state(
         "recording",
-        "再按一次快捷键结束并转写",
+        t(config, "detail.recording_hint"),
         pid,
     )
 
@@ -526,7 +533,7 @@ def request_manual_submit(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    write_status_state("submitting", "正在结束录音并准备转写", pid, logger)
+    write_status_state("submitting", t(safe_message_config(), "detail.submitting"), pid, logger)
     logger.info("Manual submit requested for recording worker: %s", pid)
     return pid, True
 
@@ -603,6 +610,7 @@ def migrate_config(config: dict[str, Any]) -> dict[str, Any]:
         migrated["config_version"] = 2
         migrated["save_recordings"] = False
         migrated.setdefault("save_transcripts", True)
+    migrated.setdefault("ui_language", "system")
     migrated.setdefault("native_hotkey_enabled", True)
     if not isinstance(migrated.get("native_hotkey"), dict):
         migrated["native_hotkey"] = {
@@ -611,6 +619,13 @@ def migrate_config(config: dict[str, Any]) -> dict[str, Any]:
             "modifiers": ["option"],
         }
     return migrated
+
+
+def safe_message_config() -> dict[str, Any]:
+    try:
+        return load_config()
+    except Exception:
+        return DEFAULT_CONFIG
 
 
 def load_terms(path: Path | None = None) -> dict[str, Any]:
@@ -625,8 +640,8 @@ def load_prompt(path: Path | None = None) -> str:
     path = path or PROMPT_PATH
     if not path.exists():
         return (
-            "你是一个面向软件开发者的语音转写纠错器。"
-            "只输出最终可直接粘贴给 Codex 的文本。"
+            "You are a conservative voice transcript corrector for software developers. "
+            "Only output the final text that can be pasted directly."
         )
     return path.read_text(encoding="utf-8").strip()
 
@@ -652,7 +667,7 @@ def flatten_terms(value: Any) -> list[str]:
     return []
 
 
-def build_initial_prompt(terms: dict[str, Any]) -> str:
+def build_initial_prompt(terms: dict[str, Any], config: dict[str, Any]) -> str:
     flattened: list[str] = []
     for key, value in terms.items():
         if key == "common_misrecognitions":
@@ -661,9 +676,7 @@ def build_initial_prompt(terms: dict[str, Any]) -> str:
     unique_terms = sorted({item.strip() for item in flattened if item.strip()})
     if not unique_terms:
         return ""
-    prompt = "以下是需要优先识别为标准写法的软件开发术语：\n" + ", ".join(
-        unique_terms
-    )
+    prompt = build_initial_prompt_text(config, ", ".join(unique_terms))
     return prompt[:4000]
 
 
@@ -835,14 +848,14 @@ def record_audio(config: dict[str, Any], logger: logging.Logger) -> Any:
     stop_reason = "completed"
 
     logger.info("Recording... speak now.")
-    write_status_state("recording", "再按一次快捷键结束并转写", os.getpid(), logger)
+    write_status_state("recording", t(config, "detail.recording_hint"), os.getpid(), logger)
     if input_device is not None:
         logger.info("Using input device: %s", input_device)
     else:
         logger.info("Using system default input device.")
     logger.info("Recording max duration: %.0f seconds.", max_seconds)
     indicator_pid = start_recording_indicator(config, logger, max_seconds)
-    notify_status(config, "正在录音，再按一次快捷键结束", logger)
+    notify_status(config, t(config, "notify.recording"), logger)
     try:
         with sd.InputStream(
             samplerate=sample_rate,
@@ -914,7 +927,7 @@ def record_audio(config: dict[str, Any], logger: logging.Logger) -> Any:
                     logger.info("Reached max recording duration.")
                     break
     except NoSpeechError:
-        notify_status(config, "未检测到有效语音", logger)
+        notify_status(config, t(config, "notify.no_speech"), logger)
         raise
     except Exception as exc:
         raise CodexVoiceError(
@@ -928,9 +941,9 @@ def record_audio(config: dict[str, Any], logger: logging.Logger) -> Any:
         raise NoSpeechError("No useful speech was captured.")
 
     if stop_reason == "max_duration":
-        notify_status(config, "已达到 5 分钟上限，正在转写", logger)
+        notify_status(config, t(config, "notify.max_reached"), logger)
     else:
-        notify_status(config, "录音结束，正在转写", logger)
+        notify_status(config, t(config, "notify.finished_recording"), logger)
     logger.info("Recording stopped: %s.", stop_reason)
 
     audio = np.concatenate(captured_frames, axis=0)
@@ -987,7 +1000,7 @@ def transcribe_with_mlx(
         ) from exc
 
     kwargs = {
-        "language": config.get("whisper_language", "zh"),
+        "language": whisper_language(config),
         "task": config.get("whisper_task", "transcribe"),
         "initial_prompt": initial_prompt or None,
         "verbose": False,
@@ -1022,7 +1035,7 @@ def transcribe_with_faster_whisper(
     )
     segments, _info = whisper.transcribe(
         str(audio_path),
-        language=config.get("whisper_language", "zh"),
+        language=whisper_language(config),
         task=config.get("whisper_task", "transcribe"),
         beam_size=int(config.get("whisper_beam_size", 5)),
         initial_prompt=initial_prompt or None,
@@ -1080,7 +1093,7 @@ def transcribe_with_ollama(
     ensure_ollama_service(config, logging.getLogger("codex-voice"), requests)
     url = f"{ollama_base_url(config)}/v1/audio/transcriptions"
     timeout = float(config.get("ollama_transcription_timeout_seconds", 120))
-    language = str(config.get("whisper_language", "zh"))
+    language = whisper_language(config)
     data: dict[str, str] = {
         "model": model,
         "response_format": "json",
@@ -1144,7 +1157,7 @@ def transcribe_audio(
     terms: dict[str, Any],
     logger: logging.Logger,
 ) -> tuple[str, str, str]:
-    initial_prompt = build_initial_prompt(terms)
+    initial_prompt = build_initial_prompt(terms, config)
     attempts = transcription_attempts(config)
 
     errors: list[str] = []
@@ -1251,41 +1264,7 @@ def strip_thinking(text: str) -> str:
 
 
 def force_simplified_chinese(text: str, config: dict[str, Any]) -> str:
-    if not bool(config.get("force_simplified_chinese", True)):
-        return text
-
-    try:
-        from opencc import OpenCC
-
-        return OpenCC("t2s").convert(text)
-    except Exception:
-        fallback_map = str.maketrans(
-            {
-                "這": "这",
-                "個": "个",
-                "為": "为",
-                "還": "还",
-                "會": "会",
-                "錄": "录",
-                "輸": "输",
-                "簡": "简",
-                "體": "体",
-                "詞": "词",
-                "彙": "汇",
-                "錯": "错",
-                "誤": "误",
-                "檔": "档",
-                "裡": "里",
-                "線": "线",
-                "對": "对",
-                "後": "后",
-                "處": "处",
-                "發": "发",
-                "檢": "检",
-                "查": "查",
-            }
-        )
-        return text.translate(fallback_map)
+    return normalize_output_text(text, config)
 
 
 def should_skip_ollama_correction(
@@ -1348,25 +1327,17 @@ def correct_with_ollama(
         logger.warning("requests is not installed; using rule-corrected text.")
         return text, "rule-only", ""
 
-    prompt = load_prompt()
+    prompt = build_correction_system_prompt(config)
+    extra_prompt = load_prompt()
+    if extra_prompt:
+        prompt = f"{prompt}\n\n{extra_prompt}"
     terms_summary = summarize_terms_for_llm(terms)
-    mode_instruction = (
-        "当前模式是 strict。可以整理成“目标 / 任务 / 约束 / 验收标准”结构，但不得新增、推断或重写用户没有说出的信息。"
-        if mode == "strict"
-        else "当前模式是 normal。请尽量保持原文逐字顺序，只做必要的词汇、中文多音字/同音/近音上下文错词、术语、错别字和格式纠错。"
-    )
-    clean_context_instruction = (
-        "本次请求是全新的独立上下文；只依据下面这段待纠错文本和术语表，不要引用、延续或记忆任何历史输入。"
-        if bool(config.get("ollama_clean_context_per_request", True))
-        else ""
-    )
-    user_content = (
-        f"{mode_instruction}\n\n"
-        f"{clean_context_instruction}\n\n"
-        "输出语言要求：英文技术词保持英文；中文一律输出简体中文，不要输出繁体字。\n\n"
-        f"术语表 JSON：\n{terms_summary}\n\n"
-        f"待纠错文本：\n{text}\n\n"
-        "只输出最终文本，不要解释。不要总结、扩写、改写语气或重排句子。"
+    user_content = build_correction_user_content(
+        config,
+        mode,
+        bool(config.get("ollama_clean_context_per_request", True)),
+        terms_summary,
+        text,
     )
 
     models = [str(config.get("ollama_model", ""))]
@@ -1564,7 +1535,7 @@ def paste_clipboard_to_frontmost(logger: logging.Logger, config: dict[str, Any])
         temp_path.replace(PASTE_REQUEST_PATH)
     except Exception as exc:
         logger.warning("Could not request paste from Codex Voice Agent: %s", exc)
-        notify_status(config, "已复制到剪贴板，自动粘贴失败", logger)
+        notify_status(config, t(config, "notify.auto_paste_failed"), logger)
         return
 
     deadline = time.monotonic() + 5
@@ -1590,17 +1561,23 @@ def paste_clipboard_to_frontmost(logger: logging.Logger, config: dict[str, Any])
 
         message = str(result.get("message", "unknown paste failure"))
         logger.warning("Auto paste failed in Codex Voice Agent: %s", message)
-        if "Accessibility" in message or "辅助功能" in message:
-            notify_status(config, ACCESSIBILITY_REENABLE_MESSAGE, logger)
+        accessibility_messages = [
+            t(language, "paste.accessibility")
+            for language in ["en", "zh-Hans", "zh-Hant", "ja"]
+        ]
+        if "Accessibility" in message or any(
+            localized in message for localized in accessibility_messages
+        ):
+            notify_status(config, t(config, "notify.accessibility"), logger)
         else:
-            notify_status(config, "已复制到剪贴板，自动粘贴失败", logger)
+            notify_status(config, t(config, "notify.auto_paste_failed"), logger)
         return
 
     logger.warning(
         "Auto paste timed out waiting for Codex Voice Agent. Last result detail: %s",
         last_message,
     )
-    notify_status(config, "已复制到剪贴板，自动粘贴失败", logger)
+    notify_status(config, t(config, "notify.auto_paste_failed"), logger)
 
 
 def paste_to_frontmost_app(
@@ -1629,7 +1606,7 @@ def paste_to_frontmost_app(
                 app_name,
                 detail,
             )
-            notify_status(config, ACCESSIBILITY_REENABLE_MESSAGE, logger)
+            notify_status(config, t(config, "notify.accessibility"), logger)
             return
 
         logger.info(
@@ -1745,7 +1722,7 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
         stage_started = time.monotonic()
         audio = record_audio(config, logger)
         logger.info("Recording stage finished in %.2fs.", time.monotonic() - stage_started)
-        write_status_state("transcribing", "正在保存录音并识别文本", os.getpid(), logger)
+        write_status_state("transcribing", t(config, "detail.transcribing"), os.getpid(), logger)
         write_wav(audio, audio_path, int(config["sample_rate"]))
         audio_rms, audio_peak = audio_rms_and_peak(audio)
         min_audio_rms = float(config.get("min_audio_rms", 0))
@@ -1754,8 +1731,8 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
             if audio_rms <= 0.000001 and audio_peak <= 0.000001:
                 raise NoSpeechError(
                     "Microphone input is silent. Check the selected input device or "
-                    "system input source, then use the status bar panel's '输入设备' "
-                    "and '测试输入'."
+                    "system input source, then use the status bar panel's Input Device "
+                    "tab and Test Input button."
                 )
             raise NoSpeechError(
                 "Captured audio was too quiet to transcribe "
@@ -1768,7 +1745,7 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
         )
         logger.info("Transcription stage finished in %.2fs.", time.monotonic() - stage_started)
         if bool(config.get("reject_repeated_hallucinations", True)) and looks_like_repeated_hallucination(raw_text):
-            final_text = "（忽略重复幻听，无有效指令）"
+            final_text = t(config, "text.repeated_hallucination")
             transcript_path = save_transcript(
                 mode=mode,
                 audio_path=saved_audio_path,
@@ -1788,7 +1765,7 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
             return 2
 
         rule_text = apply_rule_corrections(raw_text, terms)
-        write_status_state("correcting", "正在做术语和上下文纠错", os.getpid(), logger)
+        write_status_state("correcting", t(config, "detail.correcting"), os.getpid(), logger)
         stage_started = time.monotonic()
         final_text, correction_backend, correction_model = correct_with_ollama(
             rule_text, mode, config, terms, logger
@@ -1819,7 +1796,7 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
             return 0
 
         should_paste = bool(config.get("auto_paste", True)) and mode != "copy-only"
-        write_status_state("finalizing", "正在复制或粘贴最终文本", os.getpid(), logger)
+        write_status_state("finalizing", t(config, "detail.finalizing"), os.getpid(), logger)
         paste_to_frontmost_app(final_text, should_paste, config, logger)
         print(final_text)
         logger.info("Pipeline finished in %.2fs.", time.monotonic() - pipeline_started)
@@ -1840,23 +1817,34 @@ def run() -> int:
     if args.config is None:
         args.config = CONFIG_PATH
     logger = setup_logging()
+    message_config = safe_message_config()
 
     if args.status:
         with state_lock():
             pid = active_recording_pid()
             status = read_status_state()
         status_name = str(status.get("status", "idle"))
-        label = str(status.get("label", STATUS_LABELS.get(status_name, status_name)))
+        label = status_label(message_config, status_name)
         detail = str(status.get("detail", ""))
         updated_at = str(status.get("updated_at", ""))
         if pid is None:
             if status_name != "idle":
                 write_status_state("idle", "", None, logger)
-            print("Codex Voice status: idle.")
+            print(t(message_config, "cli.status_idle"))
         else:
             suffix = f", {detail}" if detail else ""
             timestamp = f", updated {updated_at}" if updated_at else ""
-            print(f"Codex Voice status: {status_name} ({label}), PID {pid}{suffix}{timestamp}.")
+            print(
+                t(
+                    message_config,
+                    "cli.status_running",
+                    status=status_name,
+                    label=label,
+                    pid=pid,
+                    suffix=suffix,
+                    timestamp=timestamp,
+                )
+            )
         return 0
 
     if args.submit_current:
@@ -1864,23 +1852,23 @@ def run() -> int:
             pid, submitted = request_manual_submit(
                 logger,
                 min_recording_age_seconds=MIN_MANUAL_SUBMIT_AGE_SECONDS,
-            )
+        )
         if pid is None:
-            print("No active Codex Voice recording.", file=sys.stderr)
+            print(t(message_config, "cli.no_active_recording"), file=sys.stderr)
             return 1
         if not submitted:
-            print("Codex Voice recording just started; ignored early submit.")
+            print(t(message_config, "cli.early_submit"))
             return 0
-        print("Submitting current Codex Voice recording.")
+        print(t(message_config, "cli.submitting"))
         return 0
 
     if args.cancel_current:
         with state_lock():
             pid = cancel_active_recording(logger)
         if pid is None:
-            print("No active Codex Voice recording.")
+            print(t(message_config, "cli.no_active_recording"))
         else:
-            print(f"Canceled Codex Voice recording worker: {pid}.")
+            print(t(message_config, "cli.canceled", pid=pid))
         return 0
 
     if args.toggle:
@@ -1891,13 +1879,13 @@ def run() -> int:
             )
             if pid is not None:
                 if submitted:
-                    print("Submitting current Codex Voice recording.")
+                    print(t(message_config, "cli.submitting"))
                 else:
-                    print("Codex Voice recording just started; ignored early submit.")
+                    print(t(message_config, "cli.early_submit"))
                 return 0
 
             pid = start_background_worker(args, logger)
-        print(f"Codex Voice recording started. Press the shortcut again to submit. PID: {pid}")
+        print(t(message_config, "cli.started", pid=pid))
         return 0
 
     if args.worker:
@@ -1914,15 +1902,17 @@ def main() -> None:
     try:
         raise SystemExit(run())
     except KeyboardInterrupt:
-        print("Codex Voice canceled.", file=sys.stderr)
+        print(t(safe_message_config(), "cli.canceled_by_user"), file=sys.stderr)
         raise SystemExit(130) from None
     except NoSpeechError as exc:
-        write_status_state("idle", f"上次未转写：{exc}", None)
-        print(f"No speech detected: {exc}", file=sys.stderr)
+        config = safe_message_config()
+        write_status_state("idle", f"{t(config, 'error.no_speech_prefix')}：{exc}", None)
+        print(t(config, "cli.no_speech", error=exc), file=sys.stderr)
         raise SystemExit(2) from None
     except CodexVoiceError as exc:
-        write_status_state("error", f"上次运行错误：{exc}", None)
-        print(f"Codex Voice error: {exc}", file=sys.stderr)
+        config = safe_message_config()
+        write_status_state("error", f"{t(config, 'error.runtime_prefix')}：{exc}", None)
+        print(t(config, "cli.error", error=exc), file=sys.stderr)
         raise SystemExit(1) from None
 
 

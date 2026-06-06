@@ -16,6 +16,14 @@ import wave
 from pathlib import Path
 from typing import Any
 
+from codex_voice.i18n import (
+    SUPPORTED_UI_LANGUAGES,
+    language_label,
+    normalize_ui_language,
+    resolve_ui_language,
+    t,
+    whisper_language,
+)
 from codex_voice.ollama import (
     ollama_base_url,
     ollama_num_ctx,
@@ -48,10 +56,18 @@ def migrate_config(config: dict[str, Any]) -> dict[str, Any]:
         migrated["config_version"] = 2
         migrated["save_recordings"] = False
         migrated.setdefault("save_transcripts", True)
+    migrated.setdefault("ui_language", "system")
     migrated.setdefault("native_hotkey_enabled", True)
     if not isinstance(migrated.get("native_hotkey"), dict):
         migrated["native_hotkey"] = DEFAULT_NATIVE_HOTKEY.copy()
     return migrated
+
+
+def safe_message_config() -> dict[str, Any]:
+    try:
+        return load_config()
+    except Exception:
+        return {"ui_language": "system"}
 
 
 def save_config(config: dict[str, Any]) -> None:
@@ -90,12 +106,25 @@ def write_model_task(
     label: str,
     detail: str = "",
     progress: float | None = None,
+    label_key: str = "",
+    detail_key: str = "",
+    label_args: dict[str, Any] | None = None,
+    detail_args: dict[str, Any] | None = None,
 ) -> None:
+    config = safe_message_config()
+    if label_key:
+        label = t(config, label_key, **(label_args or {}))
+    if detail_key:
+        detail = t(config, detail_key, **(detail_args or {}))
     payload: dict[str, Any] = {
         "status": status,
         "scope": scope,
         "label": label,
+        "label_key": label_key,
+        "label_args": label_args or {},
         "detail": detail,
+        "detail_key": detail_key,
+        "detail_args": detail_args or {},
         "progress": progress,
         "pid": os.getpid() if status == "running" else None,
         "updated_at": iso_now(),
@@ -119,11 +148,16 @@ def write_model_task(
 
 def read_model_task() -> dict[str, Any]:
     if not MODEL_TASK_PATH.exists():
+        config = safe_message_config()
         return {
             "status": "idle",
             "scope": "",
-            "label": "空闲",
+            "label": t(config, "task.idle"),
+            "label_key": "task.idle",
+            "label_args": {},
             "detail": "",
+            "detail_key": "",
+            "detail_args": {},
             "progress": None,
             "pid": None,
             "updated_at": iso_now(),
@@ -131,11 +165,16 @@ def read_model_task() -> dict[str, Any]:
     try:
         data = json.loads(MODEL_TASK_PATH.read_text(encoding="utf-8"))
     except Exception as exc:
+        config = safe_message_config()
         return {
             "status": "error",
             "scope": "",
-            "label": "模型任务状态不可读",
+            "label": t(config, "task.state_unreadable"),
+            "label_key": "task.state_unreadable",
+            "label_args": {},
             "detail": str(exc),
+            "detail_key": "",
+            "detail_args": {},
             "progress": None,
             "pid": None,
             "updated_at": iso_now(),
@@ -174,6 +213,10 @@ def parse_args() -> argparse.Namespace:
         "--set-max-minutes",
         type=float,
         help="Set max recording duration in minutes, e.g. 5.",
+    )
+    parser.add_argument(
+        "--set-ui-language",
+        help="Set UI/runtime language: system, en, zh-Hans, zh-Hant, or ja.",
     )
     parser.add_argument(
         "--list-ollama-models",
@@ -230,19 +273,29 @@ def parse_args() -> argparse.Namespace:
 
 def show(config: dict[str, Any]) -> None:
     max_seconds = int(config.get("background_max_record_seconds", config.get("max_record_seconds", 300)))
-    print(f"Codex Voice installed at: {ROOT}")
-    print(f"Conda env: {os.environ.get('CODEX_VOICE_CONDA_ENV', 'codex-voice')}")
-    print(f"Python: {os.environ.get('CODEX_VOICE_PYTHON', sys.executable)}")
-    print(f"Max recording: {max_seconds} seconds ({max_seconds / 60:g} minutes)")
-    print(f"Input device: {config.get('input_device') or 'system default'}")
-    print(f"Transcription profile: {transcription_profile(config)}")
-    print(f"Transcription model: {config.get('whisper_backend')} / {config.get('whisper_model')}")
+    resolved = resolve_ui_language(config)
+    configured_language = normalize_ui_language(config.get("ui_language", "system"))
+    print(t(config, "cli.installed_at", root=ROOT))
+    print(t(config, "cli.conda_env", env=os.environ.get("CODEX_VOICE_CONDA_ENV", "codex-voice")))
+    print(t(config, "cli.python", python=os.environ.get("CODEX_VOICE_PYTHON", sys.executable)))
+    print(t(config, "cli.max_recording", seconds=max_seconds, minutes=max_seconds / 60))
+    print(t(config, "cli.input_device", device=config.get("input_device") or t(config, "cli.system_default")))
+    print(t(config, "cli.transcription_profile", profile=transcription_profile(config)))
+    print(t(config, "cli.transcription_model", backend=config.get("whisper_backend"), model=config.get("whisper_model")))
     if config.get("ollama_transcription_model"):
-        print(f"Ollama transcription model: {config.get('ollama_transcription_model')}")
-    print(f"Correction profile: {correction_profile(config)}")
-    print(f"Correction model: {config.get('correction_backend')} / {config.get('ollama_model') or '(none)'}")
-    print(f"Output language: {config.get('output_language', 'zh-Hans+en')}")
-    print(f"Config file: {CONFIG_PATH}")
+        print(t(config, "cli.ollama_transcription_model", model=config.get("ollama_transcription_model")))
+    print(t(config, "cli.correction_profile", profile=correction_profile(config)))
+    print(t(config, "cli.correction_model", backend=config.get("correction_backend"), model=config.get("ollama_model") or "(none)"))
+    print(
+        t(
+            config,
+            "cli.ui_language",
+            language=language_label(config, configured_language),
+            resolved=language_label(config, resolved),
+        )
+    )
+    print(t(config, "cli.output_language_legacy", language=config.get("output_language", "zh-Hans+en")))
+    print(t(config, "cli.config_file", path=CONFIG_PATH))
 
 
 def transcription_profile(config: dict[str, Any]) -> str:
@@ -548,7 +601,7 @@ def set_correction_profile(config: dict[str, Any], profile: str) -> str:
         config["correction_profile"] = profile
         config["correction_backend"] = "rule-only"
         config["setup_profile"] = "custom"
-        return "规则纠错"
+        return t(config, "task.rule_correction")
     if profile == "ollama-correction":
         model = str(config.get("ollama_model") or "").strip()
         if not model:
@@ -583,11 +636,30 @@ def prepare_current_transcription_model(config: dict[str, Any]) -> None:
     if backend == "ollama":
         model = str(config.get("ollama_transcription_model") or model)
 
-    label = f"准备转录模型：{model or backend}"
-    write_model_task("running", "transcription", label, "正在检查模型配置", 0.05)
+    label_args = {"model": model or backend}
+    label = t(config, "task.prepare_transcription", **label_args)
+    write_model_task(
+        "running",
+        "transcription",
+        label,
+        t(config, "task.checking"),
+        0.05,
+        label_key="task.prepare_transcription",
+        detail_key="task.checking",
+        label_args=label_args,
+    )
     try:
         if backend == "mlx-whisper":
-            write_model_task("running", "transcription", label, "正在下载或加载 MLX Whisper 模型", None)
+            write_model_task(
+                "running",
+                "transcription",
+                label,
+                t(config, "task.loading_mlx"),
+                None,
+                label_key="task.prepare_transcription",
+                detail_key="task.loading_mlx",
+                label_args=label_args,
+            )
             import mlx_whisper
 
             with tempfile.TemporaryDirectory(prefix="codex-voice-model-") as directory:
@@ -597,7 +669,7 @@ def prepare_current_transcription_model(config: dict[str, Any]) -> None:
                     mlx_whisper.transcribe(
                         str(audio_path),
                         path_or_hf_repo=model,
-                        language=str(config.get("whisper_language", "zh")),
+                        language=whisper_language(config),
                         task=str(config.get("whisper_task", "transcribe")),
                         verbose=False,
                     )
@@ -605,12 +677,21 @@ def prepare_current_transcription_model(config: dict[str, Any]) -> None:
                     mlx_whisper.transcribe(
                         str(audio_path),
                         model,
-                        language=str(config.get("whisper_language", "zh")),
+                        language=whisper_language(config),
                         task=str(config.get("whisper_task", "transcribe")),
                         verbose=False,
                     )
         elif backend == "faster-whisper":
-            write_model_task("running", "transcription", label, "正在下载或加载 faster-whisper 模型", None)
+            write_model_task(
+                "running",
+                "transcription",
+                label,
+                t(config, "task.loading_faster"),
+                None,
+                label_key="task.prepare_transcription",
+                detail_key="task.loading_faster",
+                label_args=label_args,
+            )
             from faster_whisper import WhisperModel
 
             WhisperModel(
@@ -624,7 +705,16 @@ def prepare_current_transcription_model(config: dict[str, Any]) -> None:
             service_ready, _status, service_error = ensure_ollama_service(config)
             if not service_ready:
                 raise RuntimeError(f"Ollama service is not ready: {service_error}")
-            write_model_task("running", "transcription", label, "正在调用 Ollama 音频转录接口预热", None)
+            write_model_task(
+                "running",
+                "transcription",
+                label,
+                t(config, "task.warming_ollama_audio"),
+                None,
+                label_key="task.prepare_transcription",
+                detail_key="task.warming_ollama_audio",
+                label_args=label_args,
+            )
             try:
                 import requests
             except ImportError as exc:
@@ -643,20 +733,55 @@ def prepare_current_transcription_model(config: dict[str, Any]) -> None:
                     raise RuntimeError(response.text[:400])
         else:
             raise RuntimeError(f"Unsupported transcription backend: {backend}")
-        write_model_task("succeeded", "transcription", label, "模型已准备好", 1.0)
+        write_model_task(
+            "succeeded",
+            "transcription",
+            label,
+            t(config, "task.model_ready"),
+            1.0,
+            label_key="task.prepare_transcription",
+            detail_key="task.model_ready",
+            label_args=label_args,
+        )
     except Exception as exc:
-        write_model_task("failed", "transcription", label, str(exc), None)
+        write_model_task(
+            "failed",
+            "transcription",
+            label,
+            str(exc),
+            None,
+            label_key="task.prepare_transcription",
+            label_args=label_args,
+        )
         raise
 
 
 def prepare_current_correction_model(config: dict[str, Any]) -> None:
     backend = str(config.get("correction_backend", "ollama"))
     model = str(config.get("ollama_model", "")) if backend == "ollama" else backend
-    label = f"准备纠错模型：{model or backend}"
-    write_model_task("running", "correction", label, "正在检查模型配置", 0.05)
+    label_args = {"model": model or backend}
+    label = t(config, "task.prepare_correction", **label_args)
+    write_model_task(
+        "running",
+        "correction",
+        label,
+        t(config, "task.checking"),
+        0.05,
+        label_key="task.prepare_correction",
+        detail_key="task.checking",
+        label_args=label_args,
+    )
     try:
         if backend in {"rule-only", "none"}:
-            write_model_task("succeeded", "correction", "规则纠错", "无需加载模型", 1.0)
+            write_model_task(
+                "succeeded",
+                "correction",
+                t(config, "task.rule_correction"),
+                t(config, "task.no_model_needed"),
+                1.0,
+                label_key="task.rule_correction",
+                detail_key="task.no_model_needed",
+            )
             return
         if backend == "ollama":
             if not model:
@@ -664,7 +789,16 @@ def prepare_current_correction_model(config: dict[str, Any]) -> None:
             service_ready, _status, service_error = ensure_ollama_service(config)
             if not service_ready:
                 raise RuntimeError(f"Ollama service is not ready: {service_error}")
-            write_model_task("running", "correction", label, "正在让 Ollama 加载模型到内存", None)
+            write_model_task(
+                "running",
+                "correction",
+                label,
+                t(config, "task.loading_ollama_memory"),
+                None,
+                label_key="task.prepare_correction",
+                detail_key="task.loading_ollama_memory",
+                label_args=label_args,
+            )
             payload = {
                 "model": model,
                 "messages": [
@@ -685,18 +819,45 @@ def prepare_current_correction_model(config: dict[str, Any]) -> None:
                 payload,
                 timeout=float(config.get("ollama_model_prepare_timeout_seconds", 180)),
             )
-            write_model_task("succeeded", "correction", label, "模型已加载到内存", 1.0)
+            write_model_task(
+                "succeeded",
+                "correction",
+                label,
+                t(config, "task.model_loaded"),
+                1.0,
+                label_key="task.prepare_correction",
+                detail_key="task.model_loaded",
+                label_args=label_args,
+            )
             return
         raise RuntimeError(f"Unsupported correction backend: {backend}")
     except Exception as exc:
-        write_model_task("failed", "correction", label, str(exc), None)
+        write_model_task(
+            "failed",
+            "correction",
+            label,
+            str(exc),
+            None,
+            label_key="task.prepare_correction",
+            label_args=label_args,
+        )
         raise
 
 
 def unload_ollama_model(config: dict[str, Any], model: str, scope: str = "correction") -> None:
     model = model.strip()
-    label = f"卸载模型：{model}"
-    write_model_task("running", scope, label, "正在从内存卸载模型", None)
+    label_args = {"model": model}
+    label = t(config, "task.unload_model", **label_args)
+    write_model_task(
+        "running",
+        scope,
+        label,
+        t(config, "task.unloading"),
+        None,
+        label_key="task.unload_model",
+        detail_key="task.unloading",
+        label_args=label_args,
+    )
     try:
         if not model:
             raise RuntimeError("Ollama model name cannot be empty.")
@@ -709,10 +870,27 @@ def unload_ollama_model(config: dict[str, Any], model: str, scope: str = "correc
             {"model": model, "prompt": "", "stream": False, "keep_alive": 0},
             timeout=30,
         )
-        write_model_task("succeeded", scope, label, "模型已从内存卸载", 1.0)
+        write_model_task(
+            "succeeded",
+            scope,
+            label,
+            t(config, "task.unloaded"),
+            1.0,
+            label_key="task.unload_model",
+            detail_key="task.unloaded",
+            label_args=label_args,
+        )
         return
     except Exception as exc:
-        write_model_task("failed", scope, label, str(exc), None)
+        write_model_task(
+            "failed",
+            scope,
+            label,
+            str(exc),
+            None,
+            label_key="task.unload_model",
+            label_args=label_args,
+        )
         raise
 
 
@@ -720,7 +898,15 @@ def unload_current_correction_model(config: dict[str, Any]) -> None:
     backend = str(config.get("correction_backend", "ollama"))
     model = str(config.get("ollama_model", "")) if backend == "ollama" else backend
     if backend in {"rule-only", "none"}:
-        write_model_task("succeeded", "correction", "规则纠错", "无需卸载模型", 1.0)
+        write_model_task(
+            "succeeded",
+            "correction",
+            t(config, "task.rule_correction"),
+            t(config, "task.no_model_needed"),
+            1.0,
+            label_key="task.rule_correction",
+            detail_key="task.no_model_needed",
+        )
         return
     if backend == "ollama":
         if not model:
@@ -861,70 +1047,96 @@ def main() -> int:
         value = args.set_input_device.strip()
         if value in {"", "__default__", "default", "system", "auto"}:
             config["input_device"] = None
-            label = "system default"
+            label = t(config, "cli.system_default")
         else:
             config["input_device"] = value
             label = value
         save_config(config)
-        print(f"Codex Voice input device set to: {label}")
+        print(t(config, "cli.set_input_device", label=label))
         return 0
 
     if args.set_max_minutes is not None:
         minutes = args.set_max_minutes
         if minutes <= 0:
-            raise SystemExit("Max recording minutes must be greater than 0.")
+            raise SystemExit(t(config, "cli.max_minutes_positive"))
         if minutes > 10:
-            raise SystemExit("Refusing to set more than 10 minutes from the panel helper.")
+            raise SystemExit(t(config, "cli.max_minutes_refused"))
 
         seconds = int(round(minutes * 60))
         config["max_record_seconds"] = seconds
         config["background_max_record_seconds"] = seconds
         save_config(config)
-        print(f"Codex Voice max recording set to {seconds} seconds ({minutes:g} minutes).")
+        print(t(config, "cli.set_max_recording", seconds=seconds, minutes=minutes))
+        return 0
+
+    if args.set_ui_language is not None:
+        language = args.set_ui_language.strip()
+        normalized = normalize_ui_language(language)
+        if normalized not in SUPPORTED_UI_LANGUAGES or (
+            normalized == "system" and language not in {"", "system"}
+        ):
+            raise SystemExit(
+                t(
+                    config,
+                    "cli.invalid_ui_language",
+                    language=language,
+                    choices=", ".join(SUPPORTED_UI_LANGUAGES),
+                )
+            )
+        config["ui_language"] = normalized
+        save_config(config)
+        print(
+            t(
+                config,
+                "cli.set_ui_language",
+                language=language_label(config, normalized),
+                resolved=language_label(config, resolve_ui_language(config)),
+            )
+        )
         return 0
 
     if args.set_transcription_profile is not None:
         label = set_transcription_profile(config, args.set_transcription_profile)
         save_config(config)
-        print(f"Codex Voice transcription profile set to: {label}")
+        print(t(config, "cli.set_transcription_profile", label=label))
         return 0
 
     if args.set_ollama_transcription_model is not None:
         label = set_ollama_transcription_model(config, args.set_ollama_transcription_model)
         save_config(config)
-        print(f"Codex Voice Ollama transcription model set to: {label}")
+        print(t(config, "cli.set_ollama_transcription_model", label=label))
         return 0
 
     if args.set_correction_profile is not None:
         label = set_correction_profile(config, args.set_correction_profile)
         save_config(config)
-        print(f"Codex Voice correction profile set to: {label}")
+        print(t(config, "cli.set_correction_profile", label=label))
         return 0
 
     if args.set_ollama_correction_model is not None:
         label = set_ollama_correction_model(config, args.set_ollama_correction_model)
         save_config(config)
-        print(f"Codex Voice Ollama correction model set to: {label}")
+        print(t(config, "cli.set_ollama_correction_model", label=label))
         return 0
 
     if args.prepare_current_transcription_model:
         prepare_current_transcription_model(config)
-        print("Codex Voice transcription model is ready.")
+        print(t(config, "cli.transcription_ready"))
         return 0
 
     if args.prepare_current_correction_model:
         prepare_current_correction_model(config)
-        print("Codex Voice correction model is ready.")
+        print(t(config, "cli.correction_ready"))
         return 0
 
     if args.unload_current_correction_model:
         unload_current_correction_model(config)
-        print("Codex Voice correction model was unloaded from memory.")
+        print(t(config, "cli.correction_unloaded"))
         return 0
 
     if args.unload_ollama_model is not None:
         unload_ollama_model(config, args.unload_ollama_model)
-        print(f"Codex Voice Ollama model was unloaded: {args.unload_ollama_model}")
+        print(t(config, "cli.ollama_unloaded", model=args.unload_ollama_model))
         return 0
 
     show(config)
