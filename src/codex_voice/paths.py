@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +32,10 @@ class AppPaths:
     @property
     def logs_dir(self) -> Path:
         return self.root / "logs"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.root / "models"
 
     @property
     def state_dir(self) -> Path:
@@ -83,6 +89,14 @@ class AppPaths:
     def model_task_path(self) -> Path:
         return self.state_dir / "model-task.json"
 
+    @property
+    def model_service_socket_path(self) -> Path:
+        candidate = self.state_dir / "model-service.sock"
+        if len(os.fsencode(candidate)) < 96:
+            return candidate
+        digest = hashlib.sha256(os.fsencode(self.root)).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / f"codex-voice-{os.getuid()}-{digest}.sock"
+
     def ensure_dirs(self) -> None:
         for directory in (
             self.bin_dir,
@@ -90,6 +104,7 @@ class AppPaths:
             self.recordings_dir,
             self.transcripts_dir,
             self.logs_dir,
+            self.models_dir,
             self.state_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)

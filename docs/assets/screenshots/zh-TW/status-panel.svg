@@ -19,18 +19,15 @@
   <rect x="712" y="134" width="172" height="40" rx="9" fill="#464646"/>
   <text x="586" y="161" fill="#ffffff" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="20" font-weight="700">麥克風授權</text>
   <text x="740" y="161" fill="#ffffff" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="20" font-weight="700">輔助使用授權</text>
-  <rect x="56" y="204" width="848" height="48" rx="10" fill="#3a3a3a"/>
-  <rect x="56" y="204" width="282" height="48" rx="10" fill="#2f86ff"/>
-  <text x="154" y="236" fill="#ffffff" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="24" font-weight="800">轉錄模型</text>
-  <text x="438" y="236" fill="#f5f5f5" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="24" font-weight="800">校正模型</text>
-  <text x="728" y="236" fill="#f5f5f5" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="24" font-weight="800">輸入裝置</text>
-  <rect x="78" y="284" width="390" height="124" rx="14" fill="#1c1c1c" stroke="#3d3d3d" stroke-width="2"/>
-  <rect x="492" y="284" width="390" height="124" rx="14" fill="#1c1c1c" stroke="#3d3d3d" stroke-width="2"/>
-  <text x="100" y="326" fill="#aaaaaa" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18" font-weight="700">Ollama</text>
-  <text x="100" y="356" fill="#eeeeee" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="22" font-weight="800">未偵測到轉錄模型</text>
-  <text x="514" y="326" fill="#aaaaaa" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18" font-weight="700">線上 API</text>
-  <text x="514" y="356" fill="#eeeeee" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="22" font-weight="800">OpenAI API（未啟用）</text>
-  <line x1="56" y1="436" x2="904" y2="436" stroke="#4c4c4c" stroke-width="2"/>
-  <text x="56" y="472" fill="#f0f0f0" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="22" font-weight="800">狀態：閒置</text>
-  <text x="56" y="502" fill="#f0f0f0" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="20" font-weight="700">轉錄模型 / 校正模型 / 輸入裝置摘要</text>
+  <rect x="56" y="194" width="848" height="42" rx="9" fill="#3a3a3a"/>
+  <rect x="56" y="194" width="282" height="42" rx="9" fill="#2f86ff"/>
+  <text x="133" y="222" fill="#ffffff" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="21" font-weight="800">轉錄模型</text>
+  <text x="438" y="222" fill="#8d8d8d" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="21" font-weight="800">校正模型</text>
+  <text x="728" y="222" fill="#f5f5f5" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="21" font-weight="800">輸入裝置</text>
+  <rect x="78" y="306" width="390" height="118" rx="14" fill="#1c1c1c" stroke="#2f86ff" stroke-width="2"/>
+  <text x="100" y="344" fill="#aaaaaa" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18" font-weight="700">本機 MLX · 轉錄</text>
+  <text x="100" y="378" fill="#eeeeee" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="22" font-weight="800">Qwen3-ASR-1.7B</text>
+  <line x1="56" y1="442" x2="904" y2="442" stroke="#4c4c4c" stroke-width="2"/>
+  <text x="56" y="474" fill="#f0f0f0" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="20" font-weight="800">狀態：閒置 · 轉錄：Qwen3-ASR</text>
+  <text x="56" y="504" fill="#f0f0f0" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="19" font-weight="700">ASR：Qwen3-ASR-1.7B · 校正：不使用 · 輸入：系統預設</text>
 </svg>

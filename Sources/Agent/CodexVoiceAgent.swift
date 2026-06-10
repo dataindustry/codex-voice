@@ -34,13 +34,16 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var popover: NSPopover?
     private var panelController: CodexVoicePanelController?
     private var cachedInputDevices: [InputDevice] = []
-    private var cachedTranscriptionModels: [OllamaModel] = []
-    private var cachedCorrectionModels: [OllamaModel] = []
+    private var cachedDirectASRModels: [LocalModel] = []
+    private var cachedTranscriptionModels: [LocalModel] = []
+    private var cachedCorrectionModels: [LocalModel] = []
     private var cachedMaintenance: PanelMaintenance?
-    private var autoPreparingCorrectionModel = false
-    private var lastAutoPreparedCorrectionModel = ""
+    private var autoPreparingRouteModels = false
+    private var lastAutoPreparedRouteSignature = ""
     private var lastAutoPrepareFailureAt: Date?
-    private var lastAutoPrepareFailureModel = ""
+    private var lastAutoPrepareFailureSignature = ""
+    private let modelTaskProcessLock = NSLock()
+    private var modelTaskProcessInFlight = false
     private var quitInProgress = false
     private var lastInputProbeResult = ""
     private var isPanelScanInFlight = false
@@ -53,6 +56,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let nativeHotkeyDebounceInterval: TimeInterval = 0.35
     private let nativeHotkeyStartGraceInterval: TimeInterval = 1.0
     private let autoPrepareRetryInterval: TimeInterval = 30
+    private let maxPasteRequestAge: TimeInterval = 10
 
     override init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -136,17 +140,8 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.onSelectInputDevice = { [weak self] value in
             self?.setInputDeviceValue(value)
         }
-        controller.onWarmTranscriptionModel = { [weak self] in
-            self?.warmCurrentTranscriptionModel(nil)
-        }
-        controller.onWarmCorrectionModel = { [weak self] in
-            self?.warmCurrentCorrectionModel(nil)
-        }
-        controller.onUnloadCorrectionModel = { [weak self] in
-            self?.unloadCurrentCorrectionModel(nil)
-        }
-        controller.onUnloadOllamaModel = { [weak self] model in
-            self?.unloadOllamaModel(model)
+        controller.onUnloadLocalModel = { [weak self] model in
+            self?.unloadLocalModel(model)
         }
         controller.onProbeInput = { [weak self] in
             self?.runInputProbeForPanel()
@@ -299,15 +294,16 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let maintenance = cachedMaintenance ?? PanelMaintenance(
             pythonPath: pythonPath,
             launchAgentStatus: "com.codexvoice.agent",
-            ollamaStatus: i18n("maintenance.scanning", config: config),
-            ollamaStatusCode: "scanning",
-            ollamaBaseURL: ""
+            modelServiceStatus: i18n("maintenance.scanning", config: config),
+            modelServiceStatusCode: "scanning",
+            modelServiceSocket: ""
         )
         controller.update(
             status: voiceStatus,
             config: config,
             modelTask: task,
             inputDevices: cachedInputDevices,
+            directASRModels: cachedDirectASRModels,
             transcriptionModels: cachedTranscriptionModels,
             correctionModels: cachedCorrectionModels,
             inputProbeResult: lastInputProbeResult.isEmpty
@@ -333,38 +329,37 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global(qos: .utility).async {
             let config = self.readConfig()
             let devices = self.readInputDevices()
-            let scan = self.readOllamaScan()
+            let scan = self.readLocalModelScan()
             let launchStatus = self.readLaunchAgentSummary()
-            let ollamaStatus: String
+            let serviceStatus: String
             if scan.available {
-                ollamaStatus = scan.baseURL.isEmpty
+                serviceStatus = scan.socketPath.isEmpty
                     ? self.i18n("maintenance.available", config: config)
-                    : self.i18n("maintenance.availableAt", config: config, ["url": scan.baseURL])
-            } else if scan.status == "ollama_not_installed" {
-                ollamaStatus = self.i18n("maintenance.ollamaNotInstalled", config: config)
+                    : self.i18n("maintenance.availableAt", config: config, ["url": scan.socketPath])
             } else if scan.status == "service_unavailable" {
-                ollamaStatus = scan.error.isEmpty
+                serviceStatus = scan.error.isEmpty
                     ? self.i18n("maintenance.serviceNotReady", config: config)
                     : self.i18n("maintenance.serviceNotReadyDetail", config: config, ["error": scan.error])
             } else if scan.error.isEmpty {
-                ollamaStatus = self.i18n("maintenance.unavailable", config: config)
+                serviceStatus = self.i18n("maintenance.unavailable", config: config)
             } else {
-                ollamaStatus = self.i18n("maintenance.unavailableDetail", config: config, ["error": scan.error])
+                serviceStatus = self.i18n("maintenance.unavailableDetail", config: config, ["error": scan.error])
             }
             let maintenance = PanelMaintenance(
                 pythonPath: self.pythonPath,
                 launchAgentStatus: launchStatus,
-                ollamaStatus: ollamaStatus,
-                ollamaStatusCode: scan.status,
-                ollamaBaseURL: scan.baseURL
+                modelServiceStatus: serviceStatus,
+                modelServiceStatusCode: scan.status,
+                modelServiceSocket: scan.socketPath
             )
             DispatchQueue.main.async {
                 self.cachedInputDevices = devices
+                self.cachedDirectASRModels = scan.directASRModels
                 self.cachedTranscriptionModels = scan.transcriptionModels
                 self.cachedCorrectionModels = scan.correctionModels
                 self.cachedMaintenance = maintenance
                 self.isPanelScanInFlight = false
-                self.maybeAutoPrepareCorrectionModel(scan)
+                self.maybeAutoPrepareRouteModels(scan)
                 self.refreshPanel()
             }
         }
@@ -678,7 +673,7 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard confirmCancelRecordingBeforeQuit() else {
             return
         }
-        let loadedModels = loadedOllamaModelsForQuit()
+        let loadedModels = loadedLocalModelsForQuit()
         guard !loadedModels.isEmpty else {
             NSApp.terminate(nil)
             return
@@ -736,13 +731,13 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
-    private func loadedOllamaModelsForQuit() -> [String] {
+    private func loadedLocalModelsForQuit() -> [String] {
         let result = runProcessAndCapture(
             pythonPath,
-            [configHelperPath, "--list-loaded-ollama-models"]
+            [configHelperPath, "--list-loaded-models"]
         )
         if result.exitCode != 0 {
-            appendLog("Could not list loaded Ollama models: \(result.output)")
+            appendLog("Could not list loaded local models: \(result.output)")
             return []
         }
 
@@ -753,31 +748,30 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let models = dict["models"] as? [Any] else {
             return []
         }
+        let allModels = cachedDirectASRModels + cachedTranscriptionModels + cachedCorrectionModels
         let names = models.compactMap { item -> String? in
-            guard let name = item as? String else {
+            guard let modelID = item as? String else {
                 return nil
             }
-            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
+            let trimmed = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return nil
+            }
+            return allModels.first(where: { $0.id == trimmed })?.name ?? trimmed
         }
         return Array(Set(names)).sorted()
     }
 
     private func unloadModelsThenQuit(_ models: [String]) {
         quitInProgress = true
-        for model in models {
-            lastAutoPreparedCorrectionModel = model
-        }
-        appendLog("Quitting after unloading Ollama models: \(models.joined(separator: ", "))")
+        appendLog("Quitting after stopping model service: \(models.joined(separator: ", "))")
         DispatchQueue.global(qos: .utility).async {
-            for model in models {
-                let exitCode = self.runProcessAndWait(
-                    self.pythonPath,
-                    [self.configHelperPath, "--unload-ollama-model", model],
-                    timeout: 20
-                )
-                self.appendLog("Unload model before quit: \(model), exit=\(exitCode)")
-            }
+            let exitCode = self.runProcessAndWait(
+                self.pythonPath,
+                [self.configHelperPath, "--shutdown-model-service"],
+                timeout: 20
+            )
+            self.appendLog("Stop model service before quit exit=\(exitCode)")
             DispatchQueue.main.async {
                 NSApp.terminate(nil)
             }
@@ -887,25 +881,6 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         indicatorItem?.state = readConfigBool("recording_indicator", defaultValue: true) ? .on : .off
     }
 
-    private func currentTranscriptionProfile(_ config: [String: Any]) -> String {
-        if let profile = config["transcription_profile"] as? String, !profile.isEmpty {
-            return profile
-        }
-        if let backend = config["whisper_backend"] as? String {
-            if backend == "mlx-whisper" {
-                return "mlx-whisper-turbo"
-            }
-            if backend == "faster-whisper" {
-                return "faster-whisper-turbo"
-            }
-            if backend == "ollama" {
-                return "ollama-transcription"
-            }
-            return backend
-        }
-        return "mlx-whisper-turbo"
-    }
-
     private func refreshTranscriptionModelMenu() {
         guard let menu = transcriptionModelMenu else {
             return
@@ -913,67 +888,27 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
 
         let config = readConfig()
-        let profile = currentTranscriptionProfile(config)
-        let selectedOllamaModel = config["ollama_transcription_model"] as? String ?? ""
+        let route = config["processing_route"] as? String ?? "direct_asr"
+        let rows = cachedDirectASRModels.map { ("direct", $0) }
+            + cachedTranscriptionModels.map { ("transcription", $0) }
+        let selectedDirect = config["direct_asr_model"] as? String ?? ""
+        let selectedTranscription = config["transcription_model"] as? String ?? ""
 
         appendModelTaskMenuItems(menu, scope: "transcription")
-
-        menu.addItem(disabledMenuItem(i18n("menu.builtinTranscription", config: config)))
-        let mlxItem = actionMenuItem(
-            "MLX Whisper large-v3-turbo \(i18n("menu.recommended", config: config))",
-            #selector(selectTranscriptionModel(_:))
-        )
-        mlxItem.representedObject = "profile:mlx-whisper-turbo"
-        mlxItem.state = profile == "mlx-whisper-turbo" ? .on : .off
-        menu.addItem(mlxItem)
-
-        let fasterItem = actionMenuItem(
-            "faster-whisper large-v3-turbo \(i18n("menu.compatible", config: config))",
-            #selector(selectTranscriptionModel(_:))
-        )
-        fasterItem.representedObject = "profile:faster-whisper-turbo"
-        fasterItem.state = profile == "faster-whisper-turbo" ? .on : .off
-        menu.addItem(fasterItem)
-
-        menu.addItem(.separator())
-        menu.addItem(disabledMenuItem(i18n("menu.ollamaTranscription", config: config)))
-        let ollamaModels = readOllamaTranscriptionModels()
-        if ollamaModels.isEmpty {
-            menu.addItem(disabledMenuItem(i18n("menu.noOllamaTranscription", config: config)))
+        if rows.isEmpty {
+            menu.addItem(disabledMenuItem(i18n("maintenance.scanning", config: config)))
         } else {
-            for model in ollamaModels {
-                let suffix = model.needsTest ? i18n("menu.needsTest", config: config) : ""
-                let item = actionMenuItem(
-                    suffix.isEmpty ? model.name : "\(model.name) \(suffix)",
-                    #selector(selectTranscriptionModel(_:))
-                )
-                item.representedObject = "ollama:\(model.name)"
-                item.state = (
-                    profile == "ollama-transcription" && selectedOllamaModel == model.name
-                ) ? .on : .off
+            for (prefix, model) in rows {
+                let item = actionMenuItem(model.name, #selector(selectTranscriptionModel(_:)))
+                item.representedObject = "\(prefix):\(model.id)"
+                let selected = prefix == "direct"
+                    ? route == "direct_asr" && selectedDirect == model.id
+                    : route == "two_stage" && selectedTranscription == model.id
+                item.state = selected ? NSControl.StateValue.on : NSControl.StateValue.off
+                item.isEnabled = true
                 menu.addItem(item)
             }
         }
-
-        menu.addItem(.separator())
-        menu.addItem(disabledMenuItem(i18n("menu.externalAPI", config: config)))
-        menu.addItem(disabledMenuItem(i18n("menu.openaiDisabled", config: config)))
-    }
-
-    private func currentCorrectionProfile(_ config: [String: Any]) -> String {
-        if let profile = config["correction_profile"] as? String, !profile.isEmpty {
-            return profile
-        }
-        if let backend = config["correction_backend"] as? String {
-            if backend == "ollama" {
-                return "ollama-correction"
-            }
-            if backend == "rule-only" || backend == "none" {
-                return "rule-only"
-            }
-            return backend
-        }
-        return "rule-only"
     }
 
     private func refreshCorrectionModelMenu() {
@@ -983,42 +918,20 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
 
         let config = readConfig()
-        let profile = currentCorrectionProfile(config)
-        let selectedOllamaModel = config["ollama_model"] as? String ?? ""
+        let selected = config["correction_model"] as? String ?? ""
+        let enabled = config["correction_enabled"] as? Bool ?? false
+        correctionModelMenuItem?.isEnabled = true
 
         appendModelTaskMenuItems(menu, scope: "correction")
-
-        menu.addItem(disabledMenuItem(i18n("menu.builtinCorrection", config: config)))
-        let ruleItem = actionMenuItem(
-            i18n("card.ruleCorrection", config: config),
-            #selector(selectCorrectionModel(_:))
-        )
-        ruleItem.representedObject = "profile:rule-only"
-        ruleItem.state = profile == "rule-only" ? .on : .off
-        menu.addItem(ruleItem)
-
-        menu.addItem(.separator())
-        menu.addItem(disabledMenuItem(i18n("menu.ollamaCorrection", config: config)))
-        let ollamaModels = readOllamaCorrectionModels()
-        if ollamaModels.isEmpty {
-            menu.addItem(disabledMenuItem(i18n("menu.noOllamaCorrection", config: config)))
-        } else {
-            for model in ollamaModels {
-                let item = actionMenuItem(
-                    model.name,
-                    #selector(selectCorrectionModel(_:))
-                )
-                item.representedObject = "ollama:\(model.name)"
-                item.state = (
-                    profile == "ollama-correction" && selectedOllamaModel == model.name
-                ) ? .on : .off
-                menu.addItem(item)
-            }
+        for model in cachedCorrectionModels {
+            let item = actionMenuItem(model.name, #selector(selectCorrectionModel(_:)))
+            item.representedObject = "correction:\(model.id)"
+            item.state = enabled && selected == model.id
+                ? NSControl.StateValue.on
+                : NSControl.StateValue.off
+            item.isEnabled = model.installed || (enabled && selected == model.id)
+            menu.addItem(item)
         }
-
-        menu.addItem(.separator())
-        menu.addItem(disabledMenuItem(i18n("menu.externalAPI", config: config)))
-        menu.addItem(disabledMenuItem(i18n("menu.openaiDisabled", config: config)))
     }
 
     private func appendModelTaskMenuItems(_ menu: NSMenu, scope: String) {
@@ -1087,6 +1000,8 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return ModelTask(
             status: dict["status"] as? String ?? "idle",
             scope: dict["scope"] as? String ?? "",
+            modelID: dict["model_id"] as? String ?? "",
+            phase: dict["phase"] as? String ?? "",
             labelKey: labelKey,
             labelArgs: labelArgs,
             label: CodexVoiceI18n.modelTaskText(
@@ -1108,29 +1023,19 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
     }
 
-    private func readOllamaTranscriptionModels() -> [OllamaModel] {
-        return readOllamaScan().transcriptionModels
-    }
-
-    private func readOllamaCorrectionModels() -> [OllamaModel] {
-        return readOllamaScan().correctionModels
-    }
-
-    private func readOllamaScan() -> OllamaScan {
+    private func readLocalModelScan() -> LocalModelScan {
         let result = runProcessAndCapture(
             pythonPath,
-            [configHelperPath, "--list-ollama-models"]
+            [configHelperPath, "--list-models"]
         )
         if result.exitCode != 0 {
-            appendLog("Could not list Ollama models: \(result.output)")
-            return OllamaScan(
+            appendLog("Could not list local models: \(result.output)")
+            return LocalModelScan(
                 available: false,
                 status: "service_unavailable",
                 error: result.output,
-                baseURL: "",
-                configuredCorrectionModel: "",
-                configuredCorrectionModelInstalled: false,
-                configuredCorrectionModelLoaded: false,
+                socketPath: "",
+                directASRModels: [],
                 transcriptionModels: [],
                 correctionModels: []
             )
@@ -1139,41 +1044,40 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let data = result.output.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
               let dict = object as? [String: Any] else {
-            appendLog("Could not parse Ollama model list: \(result.output)")
-            return OllamaScan(
+            appendLog("Could not parse local model list: \(result.output)")
+            return LocalModelScan(
                 available: false,
                 status: "parse_error",
                 error: "Could not parse model scan result",
-                baseURL: "",
-                configuredCorrectionModel: "",
-                configuredCorrectionModelInstalled: false,
-                configuredCorrectionModelLoaded: false,
+                socketPath: "",
+                directASRModels: [],
                 transcriptionModels: [],
                 correctionModels: []
             )
         }
 
-        func parseModels(_ key: String) -> [OllamaModel] {
+        func parseModels(_ key: String) -> [LocalModel] {
             guard let modelDicts = dict[key] as? [[String: Any]] else {
                 return []
             }
-            return modelDicts.compactMap { item in
-                guard let name = item["name"] as? String, !name.isEmpty else {
+            return modelDicts.compactMap { item -> LocalModel? in
+                guard let id = item["id"] as? String, !id.isEmpty,
+                      let name = item["name"] as? String, !name.isEmpty else {
                     return nil
                 }
-                let capabilities = item["capabilities"] as? [String] ?? []
-                let details = item["details"] as? [String: Any] ?? [:]
                 let size = (item["size"] as? NSNumber)?.int64Value
-                return OllamaModel(
+                return LocalModel(
+                    id: id,
                     name: name,
-                    capabilities: capabilities,
-                    needsTest: item["transcription_needs_test"] as? Bool ?? false,
+                    role: item["role"] as? String ?? "",
+                    modelType: item["model_type"] as? String ?? "",
+                    installed: item["installed"] as? Bool ?? false,
                     loaded: item["loaded"] as? Bool ?? false,
                     size: size,
-                    family: details["family"] as? String ?? "",
-                    families: details["families"] as? [String] ?? [],
-                    parameterSize: details["parameter_size"] as? String ?? "",
-                    quantization: details["quantization_level"] as? String ?? ""
+                    parameterSize: item["parameter_size"] as? String ?? "",
+                    architecture: item["architecture"] as? String ?? "",
+                    vendor: item["vendor"] as? String ?? "",
+                    quantization: item["quantization"] as? String ?? ""
                 )
             }
         }
@@ -1181,74 +1085,76 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let available = dict["available"] as? Bool ?? false
         let status = dict["status"] as? String ?? (available ? "available" : "service_unavailable")
         let error = dict["error"] as? String ?? ""
-        let baseURL = dict["base_url"] as? String ?? ""
-        let configuredCorrectionModel = dict["configured_correction_model"] as? String ?? ""
-        let configuredCorrectionModelInstalled = dict["configured_correction_model_installed"] as? Bool ?? false
-        let configuredCorrectionModelLoaded = dict["configured_correction_model_loaded"] as? Bool ?? false
-        return OllamaScan(
+        return LocalModelScan(
             available: available,
             status: status,
             error: error,
-            baseURL: baseURL,
-            configuredCorrectionModel: configuredCorrectionModel,
-            configuredCorrectionModelInstalled: configuredCorrectionModelInstalled,
-            configuredCorrectionModelLoaded: configuredCorrectionModelLoaded,
+            socketPath: dict["socket"] as? String ?? "",
+            directASRModels: parseModels("direct_asr_models"),
             transcriptionModels: parseModels("transcription_models"),
             correctionModels: parseModels("correction_models")
         )
     }
 
-    private func maybeAutoPrepareCorrectionModel(_ scan: OllamaScan) {
-        let model = scan.configuredCorrectionModel
-        guard scan.available,
-              scan.configuredCorrectionModelInstalled,
-              !scan.configuredCorrectionModelLoaded,
-              !model.isEmpty else {
+    private func maybeAutoPrepareRouteModels(_ scan: LocalModelScan) {
+        guard scan.available else {
             return
         }
         let config = readConfig()
-        let backend = config["correction_backend"] as? String ?? "ollama"
-        let profile = config["correction_profile"] as? String ?? ""
-        guard backend == "ollama" || profile == "ollama-correction" else {
+        let route = config["processing_route"] as? String ?? "direct_asr"
+        var required: [LocalModel] = []
+        if route == "direct_asr" {
+            let modelID = config["direct_asr_model"] as? String ?? ""
+            required = scan.directASRModels.filter { $0.id == modelID }
+        } else {
+            let transcriptionID = config["transcription_model"] as? String ?? ""
+            required = scan.transcriptionModels.filter { $0.id == transcriptionID }
+        }
+        if config["correction_enabled"] as? Bool ?? false {
+            let correctionID = config["correction_model"] as? String ?? ""
+            required += scan.correctionModels.filter { $0.id == correctionID }
+        }
+        guard !required.isEmpty,
+              required.allSatisfy({ $0.installed }),
+              required.contains(where: { !$0.loaded }) else {
             return
         }
-        if autoPreparingCorrectionModel {
+        let signature = ([route] + required.map(\.id)).joined(separator: ":")
+        if autoPreparingRouteModels {
             return
         }
-        if lastAutoPrepareFailureModel == model,
+        if lastAutoPrepareFailureSignature == signature,
            let failedAt = lastAutoPrepareFailureAt,
            Date().timeIntervalSince(failedAt) < autoPrepareRetryInterval {
             return
         }
-        if lastAutoPreparedCorrectionModel == model {
+        if lastAutoPreparedRouteSignature == signature {
             return
         }
-        if let task = readModelTask(),
-           task.status == "running",
-           task.scope == "correction" {
+        if let task = readModelTask(), task.status == "running" {
             return
         }
 
-        autoPreparingCorrectionModel = true
-        lastAutoPreparedCorrectionModel = model
-        appendLog("Auto preparing Ollama correction model: \(model)")
-        runModelTask(["--prepare-current-correction-model"]) { [weak self] exitCode in
+        autoPreparingRouteModels = true
+        lastAutoPreparedRouteSignature = signature
+        appendLog("Auto preparing route models: \(signature)")
+        runModelTask(["--prepare-current-route-models"]) { [weak self] exitCode in
             DispatchQueue.main.async {
                 guard let self else {
                     return
                 }
-                self.autoPreparingCorrectionModel = false
+                self.autoPreparingRouteModels = false
                 if exitCode == 0 {
                     self.lastAutoPrepareFailureAt = nil
-                    self.lastAutoPrepareFailureModel = ""
+                    self.lastAutoPrepareFailureSignature = ""
                 } else {
                     self.lastAutoPrepareFailureAt = Date()
-                    self.lastAutoPrepareFailureModel = model
-                    if self.lastAutoPreparedCorrectionModel == model {
-                        self.lastAutoPreparedCorrectionModel = ""
+                    self.lastAutoPrepareFailureSignature = signature
+                    if self.lastAutoPreparedRouteSignature == signature {
+                        self.lastAutoPreparedRouteSignature = ""
                     }
                 }
-                self.appendLog("Auto prepare correction model finished: \(model), exit=\(exitCode)")
+                self.appendLog("Auto prepare route models finished: \(signature), exit=\(exitCode)")
                 self.refreshPanelScanIfNeeded(force: true)
             }
         }
@@ -1276,12 +1182,15 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setTranscriptionModelValue(_ value: String) {
         let arguments: [String]
-        if value.hasPrefix("profile:") {
-            let profile = String(value.dropFirst("profile:".count))
-            arguments = [configHelperPath, "--set-transcription-profile", profile]
-        } else if value.hasPrefix("ollama:") {
-            let model = String(value.dropFirst("ollama:".count))
-            arguments = [configHelperPath, "--set-ollama-transcription-model", model]
+        let route: String
+        if value.hasPrefix("direct:") {
+            let model = String(value.dropFirst("direct:".count))
+            arguments = [configHelperPath, "--set-direct-asr-model", model]
+            route = "direct_asr"
+        } else if value.hasPrefix("transcription:") {
+            let model = String(value.dropFirst("transcription:".count))
+            arguments = [configHelperPath, "--set-transcription-model", model]
+            route = "two_stage"
         } else {
             appendLog("Unsupported transcription menu value: \(value)")
             return
@@ -1290,7 +1199,23 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let result = runProcessAndCapture(pythonPath, arguments)
         appendLog("Set transcription model value=\(value), exit=\(result.exitCode): \(result.output)")
         if result.exitCode == 0 {
-            runModelTask(["--prepare-current-transcription-model"])
+            let routeResult = runProcessAndCapture(
+                pythonPath,
+                [configHelperPath, "--set-processing-route", route]
+            )
+            appendLog("Set implicit processing route=\(route), exit=\(routeResult.exitCode): \(routeResult.output)")
+            guard routeResult.exitCode == 0 else {
+                refreshTranscriptionModelMenu()
+                refreshPanel()
+                return
+            }
+            lastAutoPreparedRouteSignature = ""
+            let model = value.split(separator: ":", maxSplits: 1).last.map(String.init) ?? ""
+            runModelTask(["--ensure-model", model]) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.refreshPanelScanIfNeeded(force: true)
+                }
+            }
         }
         refreshTranscriptionModelMenu()
         refreshPanel()
@@ -1304,48 +1229,32 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setCorrectionModelValue(_ value: String) {
-        let arguments: [String]
-        if value.hasPrefix("profile:") {
-            let profile = String(value.dropFirst("profile:".count))
-            arguments = [configHelperPath, "--set-correction-profile", profile]
-        } else if value.hasPrefix("ollama:") {
-            let model = String(value.dropFirst("ollama:".count))
-            arguments = [configHelperPath, "--set-ollama-correction-model", model]
-        } else {
+        guard value.hasPrefix("correction:") else {
             appendLog("Unsupported correction menu value: \(value)")
             return
         }
+        let model = String(value.dropFirst("correction:".count))
+        let arguments = [configHelperPath, "--toggle-correction-model", model]
 
         let result = runProcessAndCapture(pythonPath, arguments)
-        appendLog("Set correction model value=\(value), exit=\(result.exitCode): \(result.output)")
+        appendLog("Toggle correction model value=\(value), exit=\(result.exitCode): \(result.output)")
         if result.exitCode == 0 {
-            runModelTask(["--prepare-current-correction-model"])
+            lastAutoPreparedRouteSignature = ""
+            if readConfigBool("correction_enabled", defaultValue: false) {
+                runModelTask(["--ensure-model", model]) { [weak self] _ in
+                    DispatchQueue.main.async {
+                        self?.refreshPanelScanIfNeeded(force: true)
+                    }
+                }
+            }
         }
         refreshCorrectionModelMenu()
         refreshPanel()
     }
 
-    @objc private func warmCurrentTranscriptionModel(_ sender: Any?) {
-        runModelTask(["--prepare-current-transcription-model"])
-        refreshTranscriptionModelMenu()
-        refreshPanel()
-    }
-
-    @objc private func warmCurrentCorrectionModel(_ sender: Any?) {
-        runModelTask(["--prepare-current-correction-model"])
-        refreshCorrectionModelMenu()
-        refreshPanel()
-    }
-
-    @objc private func unloadCurrentCorrectionModel(_ sender: Any?) {
-        runModelTask(["--unload-current-correction-model"])
-        refreshCorrectionModelMenu()
-        refreshPanel()
-    }
-
-    private func unloadOllamaModel(_ model: String) {
-        lastAutoPreparedCorrectionModel = model
-        runModelTask(["--unload-ollama-model", model]) { [weak self] _ in
+    private func unloadLocalModel(_ model: String) {
+        lastAutoPreparedRouteSignature = ""
+        runModelTask(["--unload-model", model]) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.refreshPanelScanIfNeeded(force: true)
             }
@@ -1358,11 +1267,24 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ arguments: [String],
         completion: ((Int32) -> Void)? = nil
     ) {
+        modelTaskProcessLock.lock()
+        guard !modelTaskProcessInFlight else {
+            modelTaskProcessLock.unlock()
+            appendLog("Ignored duplicate model task: \(arguments.joined(separator: " "))")
+            completion?(75)
+            return
+        }
+        modelTaskProcessInFlight = true
+        modelTaskProcessLock.unlock()
+
         DispatchQueue.global(qos: .utility).async {
             let exitCode = self.runProcessAndWait(
                 self.pythonPath,
                 [self.configHelperPath] + arguments
             )
+            self.modelTaskProcessLock.lock()
+            self.modelTaskProcessInFlight = false
+            self.modelTaskProcessLock.unlock()
             self.appendLog(
                 "Model task finished: \(arguments.joined(separator: " ")), "
                 + "exit=\(exitCode)"
@@ -1492,8 +1414,22 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let url = URL(fileURLWithPath: configPath)
         guard let data = try? Data(contentsOf: url),
               let object = try? JSONSerialization.jsonObject(with: data),
-              let dict = object as? [String: Any] else {
+              var dict = object as? [String: Any] else {
             return [:]
+        }
+        if dict["processing_route"] == nil {
+            let version = (dict["config_version"] as? NSNumber)?.intValue ?? 1
+            dict["processing_route"] = !dict.isEmpty && version < 3
+                ? "two_stage"
+                : "direct_asr"
+        }
+        if (dict["direct_asr_model"] as? String) == "qwen3-asr-1.7b" {
+            dict["direct_asr_model"] = "qwen3-asr-1.7b-8bit"
+        }
+        if dict["correction_enabled"] == nil {
+            let version = (dict["config_version"] as? NSNumber)?.intValue ?? 1
+            dict["correction_enabled"] = version < 4
+                && (dict["processing_route"] as? String) == "two_stage"
         }
         return dict
     }
@@ -1605,6 +1541,15 @@ final class CodexVoiceAgent: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let request = object as? [String: Any],
               let requestID = request["id"] as? String,
               !requestID.isEmpty else {
+            return
+        }
+
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: pasteRequestPath),
+           let modifiedAt = attributes[.modificationDate] as? Date,
+           Date().timeIntervalSince(modifiedAt) > maxPasteRequestAge {
+            try? FileManager.default.removeItem(at: requestURL)
+            appendLog("Ignored expired paste request: \(requestID)")
+            writePasteResult(id: requestID, ok: false, message: "expired")
             return
         }
 

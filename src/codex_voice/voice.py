@@ -36,13 +36,12 @@ from codex_voice.i18n import (
     t,
     whisper_language,
 )
-from codex_voice.ollama import (
-    DEFAULT_OLLAMA_NUM_CTX,
-    ollama_base_url,
-    ollama_chat_url,
-    ollama_num_ctx,
-    start_ollama_processes,
+from codex_voice.model_catalog import (
+    DEFAULT_CORRECTION_MODEL,
+    DEFAULT_DIRECT_ASR_MODEL,
+    DEFAULT_TRANSCRIPTION_MODEL,
 )
+from codex_voice.model_client import ModelServiceError, request_model_service
 from codex_voice.paths import AppPaths, paths_for_root
 
 PATHS = paths_for_root()
@@ -99,46 +98,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "native_hotkey": {"key_code": 49, "key": "space", "modifiers": ["option"]},
     "paste_requires_editable_focus": True,
     "setup_profile": "recommended",
-    "transcription_profile": "mlx-whisper-turbo",
-    "whisper_backend": "mlx-whisper",
-    "whisper_model": "mlx-community/whisper-large-v3-turbo",
-    "whisper_fallback_backend": "faster-whisper",
-    "whisper_fallback_model": "large-v3-turbo",
+    "processing_route": "direct_asr",
+    "direct_asr_model": DEFAULT_DIRECT_ASR_MODEL,
+    "transcription_model": DEFAULT_TRANSCRIPTION_MODEL,
+    "correction_model": DEFAULT_CORRECTION_MODEL,
+    "correction_enabled": False,
     "whisper_language": "zh",
     "whisper_task": "transcribe",
-    "whisper_beam_size": 5,
-    "faster_whisper_device": "cpu",
-    "faster_whisper_compute_type": "int8",
-    "correction_backend": "ollama",
-    "ollama_base_url": "http://127.0.0.1:11434",
-    "ollama_transcription_model": "",
-    "ollama_transcription_timeout_seconds": 120,
-    "ollama_url": "http://127.0.0.1:11434/api/chat",
-    "external_api_enabled": False,
-    "openai_transcription_model": "",
-    "openai_correction_model": "",
-    "ollama_model": "qwen3.6:35b-a3b",
-    "correction_profile": "ollama-correction",
-    "ollama_fallback_models": [],
-    "ollama_timeout_seconds": 7,
-    "ollama_model_prepare_timeout_seconds": 180,
-    "ollama_temperature": 0,
-    "ollama_num_predict": 256,
-    "ollama_num_ctx": DEFAULT_OLLAMA_NUM_CTX,
-    "ollama_think": False,
-    "ollama_keep_alive": -1,
-    "ollama_clean_context_per_request": True,
-    "ollama_skip_simple_utterances": True,
-    "ollama_simple_max_chars": 8,
-    "ollama_reject_aggressive_rewrite": True,
-    "ollama_min_similarity": 0.80,
-    "ollama_min_length_ratio": 0.80,
-    "ollama_max_length_ratio": 1.20,
+    "correction_timeout_seconds": 300,
+    "correction_num_predict": 256,
+    "correction_clean_context_per_request": True,
+    "correction_reject_aggressive_rewrite": True,
+    "correction_min_similarity": 0.80,
+    "correction_min_length_ratio": 0.80,
+    "correction_max_length_ratio": 1.20,
     "output_language": "zh-Hans+en",
     "force_simplified_chinese": True,
     "auto_paste": True,
     "ui_language": "system",
-    "config_version": 2,
+    "config_version": 4,
     "save_recordings": False,
     "save_transcripts": True,
     "mode": "normal",
@@ -153,7 +131,7 @@ class NoSpeechError(CodexVoiceError):
 
 
 class MissingDependencyError(CodexVoiceError):
-    """Raised when an optional runtime dependency is unavailable."""
+    """Raised when a required runtime dependency is unavailable."""
 
 
 def ensure_runtime_path() -> None:
@@ -604,21 +582,9 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
 
 
 def migrate_config(config: dict[str, Any]) -> dict[str, Any]:
-    migrated = dict(config)
-    version = int(migrated.get("config_version", 1) or 1)
-    if version < 2:
-        migrated["config_version"] = 2
-        migrated["save_recordings"] = False
-        migrated.setdefault("save_transcripts", True)
-    migrated.setdefault("ui_language", "system")
-    migrated.setdefault("native_hotkey_enabled", True)
-    if not isinstance(migrated.get("native_hotkey"), dict):
-        migrated["native_hotkey"] = {
-            "key_code": 49,
-            "key": "space",
-            "modifiers": ["option"],
-        }
-    return migrated
+    from codex_voice.config_cli import migrate_config as migrate
+
+    return migrate(config)
 
 
 def safe_message_config() -> dict[str, Any]:
@@ -989,166 +955,13 @@ def create_audio_path(config: dict[str, Any]) -> tuple[Path, bool]:
     return Path(temp.name), True
 
 
-def transcribe_with_mlx(
-    audio_path: Path, model: str, config: dict[str, Any], initial_prompt: str
-) -> str:
-    try:
-        import mlx_whisper
-    except ImportError as exc:
-        raise MissingDependencyError(
-            "Missing dependency: mlx-whisper. Run: bash ~/CodexVoice/bin/install.sh"
-        ) from exc
-
-    kwargs = {
-        "language": whisper_language(config),
-        "task": config.get("whisper_task", "transcribe"),
-        "initial_prompt": initial_prompt or None,
-        "verbose": False,
-    }
-    try:
-        result = mlx_whisper.transcribe(
-            str(audio_path),
-            path_or_hf_repo=model,
-            **kwargs,
-        )
-    except TypeError:
-        result = mlx_whisper.transcribe(str(audio_path), model, **kwargs)
-    if isinstance(result, dict):
-        return str(result.get("text", "")).strip()
-    return str(result).strip()
-
-
-def transcribe_with_faster_whisper(
-    audio_path: Path, model: str, config: dict[str, Any], initial_prompt: str
-) -> str:
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:
-        raise MissingDependencyError(
-            "Missing dependency: faster-whisper. Run: bash ~/CodexVoice/bin/install.sh"
-        ) from exc
-
-    whisper = WhisperModel(
-        model,
-        device=str(config.get("faster_whisper_device", "cpu")),
-        compute_type=str(config.get("faster_whisper_compute_type", "int8")),
-    )
-    segments, _info = whisper.transcribe(
-        str(audio_path),
-        language=whisper_language(config),
-        task=config.get("whisper_task", "transcribe"),
-        beam_size=int(config.get("whisper_beam_size", 5)),
-        initial_prompt=initial_prompt or None,
-        vad_filter=True,
-    )
-    return "".join(segment.text for segment in segments).strip()
-
-
-def start_ollama(config: dict[str, Any], logger: logging.Logger) -> None:
-    started, error = start_ollama_processes(config)
-    if not started:
-        logger.warning("%s", error)
-    elif error:
-        logger.debug("Ollama start reported non-fatal errors: %s", error)
-
-
-def ensure_ollama_service(
-    config: dict[str, Any],
-    logger: logging.Logger,
-    requests_module: Any,
-) -> None:
-    url = f"{ollama_base_url(config)}/api/tags"
-    try:
-        requests_module.get(url, timeout=2).raise_for_status()
-        return
-    except Exception as exc:
-        logger.info("Ollama API is not ready at %s: %s", url, exc)
-
-    start_ollama(config, logger)
-    deadline = time.monotonic() + float(config.get("ollama_start_timeout_seconds", 12))
-    last_error = ""
-    while time.monotonic() <= deadline:
-        try:
-            requests_module.get(url, timeout=2).raise_for_status()
-            return
-        except Exception as exc:
-            last_error = str(exc)
-            time.sleep(0.4)
-    logger.warning("Ollama API did not become ready at %s: %s", url, last_error)
-
-
-def transcribe_with_ollama(
-    audio_path: Path, model: str, config: dict[str, Any], initial_prompt: str
-) -> str:
-    try:
-        import requests
-    except ImportError as exc:
-        raise MissingDependencyError(
-            "Missing dependency: requests. Run: bash ~/CodexVoice/bin/install.sh"
-        ) from exc
-
-    if not model:
-        raise CodexVoiceError("No Ollama transcription model is configured.")
-
-    ensure_ollama_service(config, logging.getLogger("codex-voice"), requests)
-    url = f"{ollama_base_url(config)}/v1/audio/transcriptions"
-    timeout = float(config.get("ollama_transcription_timeout_seconds", 120))
-    language = whisper_language(config)
-    data: dict[str, str] = {
-        "model": model,
-        "response_format": "json",
-        "temperature": "0",
-    }
-    if language:
-        data["language"] = language
-    if initial_prompt:
-        data["prompt"] = initial_prompt
-
-    with audio_path.open("rb") as handle:
-        files = {
-            "file": (audio_path.name, handle, "audio/wav"),
-        }
-        response = requests.post(url, data=data, files=files, timeout=timeout)
-
-    if response.status_code >= 400:
-        raise CodexVoiceError(
-            f"Ollama transcription failed with HTTP {response.status_code}: "
-            f"{response.text[:400]}"
-        )
-
-    content_type = response.headers.get("content-type", "")
-    if "application/json" in content_type:
-        payload = response.json()
-        if isinstance(payload, dict):
-            return str(payload.get("text", "")).strip()
-    return response.text.strip()
-
-
-def transcription_attempts(config: dict[str, Any]) -> list[tuple[str, str]]:
-    primary_backend = str(config.get("whisper_backend", "mlx-whisper"))
-    primary_model = str(config.get("whisper_model", "mlx-community/whisper-large-v3-turbo"))
-    if primary_backend == "ollama":
-        primary_model = str(config.get("ollama_transcription_model") or primary_model)
-
-    configured_attempts = [(primary_backend, primary_model)]
-    fallback_backend = str(config.get("whisper_fallback_backend", ""))
-    fallback_model = str(config.get("whisper_fallback_model", ""))
-    if fallback_backend and fallback_model:
-        configured_attempts.append((fallback_backend, fallback_model))
-
-    if primary_backend == "ollama":
-        configured_attempts.extend(
-            [
-                ("mlx-whisper", "mlx-community/whisper-large-v3-turbo"),
-                ("faster-whisper", "large-v3-turbo"),
-            ]
-        )
-
-    attempts: list[tuple[str, str]] = []
-    for backend, model in configured_attempts:
-        if backend and model and (backend, model) not in attempts:
-            attempts.append((backend, model))
-    return attempts
+def qwen_asr_language(config: dict[str, Any]) -> str:
+    return {
+        "en": "English",
+        "zh-Hans": "Chinese",
+        "zh-Hant": "Chinese",
+        "ja": "Japanese",
+    }.get(resolve_ui_language(config), "English")
 
 
 def transcribe_audio(
@@ -1158,38 +971,39 @@ def transcribe_audio(
     logger: logging.Logger,
 ) -> tuple[str, str, str]:
     initial_prompt = build_initial_prompt(terms, config)
-    attempts = transcription_attempts(config)
+    route = str(config.get("processing_route", "direct_asr"))
+    if route == "direct_asr":
+        backend = "qwen3-asr"
+        model = str(config.get("direct_asr_model", DEFAULT_DIRECT_ASR_MODEL))
+        language = qwen_asr_language(config)
+    elif route == "two_stage":
+        backend = "mlx-whisper"
+        model = str(config.get("transcription_model", DEFAULT_TRANSCRIPTION_MODEL))
+        language = whisper_language(config)
+    else:
+        raise CodexVoiceError(f"Unsupported processing route: {route}")
 
-    errors: list[str] = []
-    for backend, model in attempts:
-        attempt_started = time.monotonic()
-        try:
-            logger.info("Transcribing with %s: %s", backend, model)
-            if backend == "mlx-whisper":
-                text = transcribe_with_mlx(audio_path, model, config, initial_prompt)
-            elif backend == "faster-whisper":
-                text = transcribe_with_faster_whisper(
-                    audio_path, model, config, initial_prompt
-                )
-            elif backend == "ollama":
-                text = transcribe_with_ollama(audio_path, model, config, initial_prompt)
-            else:
-                raise CodexVoiceError(f"Unsupported whisper_backend: {backend}")
-            text = text.strip()
-            if not text:
-                raise CodexVoiceError("Whisper returned empty text.")
-            logger.info(
-                "Transcription succeeded with %s in %.2fs.",
-                backend,
-                time.monotonic() - attempt_started,
-            )
-            return text, backend, model
-        except Exception as exc:  # Try fallback before failing the workflow.
-            message = f"{backend}/{model} after {time.monotonic() - attempt_started:.2f}s: {exc}"
-            logger.warning("Transcription attempt failed: %s", message)
-            errors.append(message)
-
-    raise CodexVoiceError("All transcription attempts failed:\n" + "\n".join(errors))
+    started = time.monotonic()
+    logger.info("Transcribing route=%s backend=%s model=%s", route, backend, model)
+    try:
+        response = request_model_service(
+            PATHS,
+            {
+                "action": "transcribe",
+                "model_id": model,
+                "audio_path": str(audio_path),
+                "language": language,
+                "context": initial_prompt,
+            },
+            timeout=600,
+        )
+    except ModelServiceError as exc:
+        raise CodexVoiceError(f"Transcription model failed: {exc}") from exc
+    text = str(response.get("text") or "").strip()
+    if not text:
+        raise CodexVoiceError(f"{model} returned empty text.")
+    logger.info("Transcription succeeded in %.2fs.", time.monotonic() - started)
+    return text, backend, model
 
 
 def token_repetition_ratio(text: str) -> float:
@@ -1267,21 +1081,6 @@ def force_simplified_chinese(text: str, config: dict[str, Any]) -> str:
     return normalize_output_text(text, config)
 
 
-def should_skip_ollama_correction(
-    text: str,
-    mode: str,
-    config: dict[str, Any],
-) -> bool:
-    if mode == "strict":
-        return False
-    if not bool(config.get("ollama_skip_simple_utterances", True)):
-        return False
-
-    compact_length = len(re.sub(r"\s+", "", text))
-    max_chars = int(config.get("ollama_simple_max_chars", 28))
-    return compact_length <= max_chars
-
-
 def looks_like_aggressive_rewrite(
     original: str,
     corrected: str,
@@ -1290,7 +1089,7 @@ def looks_like_aggressive_rewrite(
 ) -> bool:
     if mode == "strict":
         return False
-    if not bool(config.get("ollama_reject_aggressive_rewrite", True)):
+    if not bool(config.get("correction_reject_aggressive_rewrite", True)):
         return False
 
     original_compact = re.sub(r"\s+", "", original)
@@ -1299,34 +1098,22 @@ def looks_like_aggressive_rewrite(
         return False
 
     length_ratio = len(corrected_compact) / max(1, len(original_compact))
-    if length_ratio < float(config.get("ollama_min_length_ratio", 0.65)):
+    if length_ratio < float(config.get("correction_min_length_ratio", 0.65)):
         return True
-    if length_ratio > float(config.get("ollama_max_length_ratio", 1.35)):
+    if length_ratio > float(config.get("correction_max_length_ratio", 1.35)):
         return True
 
     similarity = SequenceMatcher(None, original_compact, corrected_compact).ratio()
-    return similarity < float(config.get("ollama_min_similarity", 0.55))
+    return similarity < float(config.get("correction_min_similarity", 0.55))
 
 
-def correct_with_ollama(
+def correct_with_model_service(
     text: str,
     mode: str,
     config: dict[str, Any],
     terms: dict[str, Any],
     logger: logging.Logger,
 ) -> tuple[str, str, str]:
-    if str(config.get("correction_backend", "ollama")) != "ollama":
-        return text, str(config.get("correction_backend", "none")), ""
-    if should_skip_ollama_correction(text, mode, config):
-        logger.info("Skipping Ollama correction for short utterance.")
-        return text, "rule-only", ""
-
-    try:
-        import requests
-    except ImportError:
-        logger.warning("requests is not installed; using rule-corrected text.")
-        return text, "rule-only", ""
-
     prompt = build_correction_system_prompt(config)
     extra_prompt = load_prompt()
     if extra_prompt:
@@ -1335,74 +1122,58 @@ def correct_with_ollama(
     user_content = build_correction_user_content(
         config,
         mode,
-        bool(config.get("ollama_clean_context_per_request", True)),
+        bool(config.get("correction_clean_context_per_request", True)),
         terms_summary,
         text,
     )
-
-    models = [str(config.get("ollama_model", ""))]
-    models.extend(str(item) for item in config.get("ollama_fallback_models", []) if item)
-    models = [model for index, model in enumerate(models) if model and model not in models[:index]]
-
-    ensure_ollama_service(config, logger, requests)
-    timeout = float(config.get("ollama_timeout_seconds", 25))
-    url = ollama_chat_url(config)
-    last_error = ""
-
-    for model in models:
-        attempt_started = time.monotonic()
-        # Keep this request stateless: keep_alive keeps model weights loaded, not prior chat turns.
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-            "think": bool(config.get("ollama_think", False)),
-            "keep_alive": config.get("ollama_keep_alive", "10m"),
-            "options": {
-                "temperature": float(config.get("ollama_temperature", 0)),
-                "num_predict": int(config.get("ollama_num_predict", 512)),
+    model = str(config.get("correction_model", DEFAULT_CORRECTION_MODEL))
+    started = time.monotonic()
+    logger.info("Correcting text with MLX model: %s", model)
+    try:
+        response = request_model_service(
+            PATHS,
+            {
+                "action": "correct",
+                "model_id": model,
+                "system_prompt": prompt,
+                "user_prompt": user_content,
+                "max_tokens": int(config.get("correction_num_predict", 256)),
             },
-        }
-        num_ctx = config.get("ollama_num_ctx")
-        if num_ctx:
-            payload["options"]["num_ctx"] = ollama_num_ctx(config)
-        try:
-            logger.info("Correcting text with Ollama model: %s", model)
-            response = requests.post(url, json=payload, timeout=timeout)
-            response.raise_for_status()
-            data = response.json()
-            corrected = data.get("message", {}).get("content", "")
-            corrected = strip_thinking(str(corrected))
-            if corrected:
-                if looks_like_aggressive_rewrite(text, corrected, mode, config):
-                    logger.warning(
-                        "Ollama correction looked too aggressive; using rule-corrected text."
-                    )
-                    return text, "rule-only", ""
-                logger.info(
-                    "Ollama correction succeeded with %s in %.2fs.",
-                    model,
-                    time.monotonic() - attempt_started,
-                )
-                return corrected, "ollama", model
-            last_error = f"{model}: empty response"
-        except Exception as exc:
-            last_error = f"{model} after {time.monotonic() - attempt_started:.2f}s: {exc}"
-            logger.warning("Ollama correction failed: %s", last_error)
+            timeout=float(config.get("correction_timeout_seconds", 300)),
+        )
+    except ModelServiceError as exc:
+        raise CodexVoiceError(f"Correction model failed: {exc}") from exc
+    corrected = strip_thinking(str(response.get("text") or ""))
+    if not corrected:
+        raise CodexVoiceError(f"Correction model returned empty text: {model}")
+    if looks_like_aggressive_rewrite(text, corrected, mode, config):
+        logger.warning("Correction looked too aggressive; using rule-corrected text.")
+        return text, "rule-only", ""
+    logger.info("MLX correction succeeded in %.2fs.", time.monotonic() - started)
+    return corrected, "mlx-lm", model
 
-    if last_error:
-        logger.warning("Using rule-corrected text after Ollama failure: %s", last_error)
-    return text, "rule-only", ""
+
+def correct_for_route(
+    text: str,
+    mode: str,
+    config: dict[str, Any],
+    terms: dict[str, Any],
+    logger: logging.Logger,
+) -> tuple[str, str, str]:
+    route = str(config.get("processing_route", "direct_asr"))
+    if route not in {"direct_asr", "two_stage"}:
+        raise CodexVoiceError(f"Unsupported processing route: {route}")
+    if not bool(config.get("correction_enabled", False)):
+        return text, "not-used", ""
+    return correct_with_model_service(text, mode, config, terms, logger)
 
 
 def save_transcript(
     mode: str,
     audio_path: Path | None,
-    whisper_backend: str,
-    whisper_model: str,
+    processing_route: str,
+    asr_backend: str,
+    asr_model: str,
     correction_backend: str,
     correction_model: str,
     raw_text: str,
@@ -1420,10 +1191,12 @@ def save_transcript(
 * Time: {datetime.now().isoformat(timespec="seconds")}
 * Mode: {mode}
 * Audio: {audio_display}
-* Whisper Backend: {whisper_backend}
-* Whisper Model: {whisper_model}
+* Processing Route: {processing_route}
+* ASR Backend: {asr_backend}
+* ASR Model: {asr_model}
 * Correction Backend: {correction_backend}
 * Correction Model: {correction_model or "(none)"}
+* Correction Applied: {"yes" if correction_model else "no"}
 
 ## Raw Transcript
 
@@ -1740,7 +1513,8 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
             )
 
         stage_started = time.monotonic()
-        raw_text, whisper_backend, whisper_model = transcribe_audio(
+        processing_route = str(config.get("processing_route", "direct_asr"))
+        raw_text, asr_backend, asr_model = transcribe_audio(
             audio_path, config, terms, logger
         )
         logger.info("Transcription stage finished in %.2fs.", time.monotonic() - stage_started)
@@ -1749,8 +1523,9 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
             transcript_path = save_transcript(
                 mode=mode,
                 audio_path=saved_audio_path,
-                whisper_backend=whisper_backend,
-                whisper_model=whisper_model,
+                processing_route=processing_route,
+                asr_backend=asr_backend,
+                asr_model=asr_model,
                 correction_backend="rejected",
                 correction_model="repeated-hallucination-filter",
                 raw_text=raw_text,
@@ -1760,26 +1535,33 @@ def run_pipeline(args: argparse.Namespace, logger: logging.Logger) -> int:
             )
             if transcript_path:
                 logger.info("Saved rejected transcript: %s", transcript_path)
-            logger.warning("Rejected repeated Whisper hallucination; not copying or pasting.")
+            logger.warning("Rejected repeated ASR hallucination; not copying or pasting.")
             print(final_text)
             return 2
 
         rule_text = apply_rule_corrections(raw_text, terms)
-        write_status_state("correcting", t(config, "detail.correcting"), os.getpid(), logger)
+        correction_enabled = bool(config.get("correction_enabled", False))
+        if correction_enabled:
+            write_status_state("correcting", t(config, "detail.correcting"), os.getpid(), logger)
         stage_started = time.monotonic()
-        final_text, correction_backend, correction_model = correct_with_ollama(
+        final_text, correction_backend, correction_model = correct_for_route(
             rule_text, mode, config, terms, logger
         )
+        if correction_enabled:
+            logger.info(
+                "Correction stage finished in %.2fs.",
+                time.monotonic() - stage_started,
+            )
         final_text = force_simplified_chinese(final_text, config)
-        logger.info("Correction stage finished in %.2fs.", time.monotonic() - stage_started)
         if not final_text.strip():
             raise CodexVoiceError("Final transcript is empty.")
 
         transcript_path = save_transcript(
             mode=mode,
             audio_path=saved_audio_path,
-            whisper_backend=whisper_backend,
-            whisper_model=whisper_model,
+            processing_route=processing_route,
+            asr_backend=asr_backend,
+            asr_model=asr_model,
             correction_backend=correction_backend,
             correction_model=correction_model,
             raw_text=raw_text,

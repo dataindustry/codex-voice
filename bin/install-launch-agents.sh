@@ -7,6 +7,8 @@ UID_VALUE="$(id -u)"
 
 AGENT_LABEL="com.codexvoice.agent"
 AGENT_PLIST="$AGENT_DIR/$AGENT_LABEL.plist"
+MODEL_SERVICE_LABEL="com.codexvoice.model-service"
+MODEL_SERVICE_PLIST="$AGENT_DIR/$MODEL_SERVICE_LABEL.plist"
 AGENT_SOURCE_DIR="$ROOT/Sources/Agent"
 AGENT_APP="$ROOT/Codex Voice Agent.app"
 AGENT_CONTENTS="$AGENT_APP/Contents"
@@ -166,9 +168,53 @@ compile_recording_indicator() {
 }
 
 PYTHON_BIN="$(resolve_python)"
+"$PYTHON_BIN" "$ROOT/bin/codex-voice-config.py" --root "$ROOT" --migrate-config
 compile_agent
 compile_recording_indicator
 reset_accessibility_permission_if_needed
+
+cat >"$MODEL_SERVICE_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$MODEL_SERVICE_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$PYTHON_BIN</string>
+    <string>-m</string>
+    <string>codex_voice.model_service</string>
+    <string>--root</string>
+    <string>$ROOT</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>WorkingDirectory</key>
+  <string>$ROOT</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/anaconda3/bin:$HOME/miniconda3/bin:$HOME/miniforge3/bin</string>
+    <key>CODEX_VOICE_HOME</key>
+    <string>$ROOT</string>
+    <key>CODEX_VOICE_PYTHON</key>
+    <string>$PYTHON_BIN</string>
+    <key>PYTHONNOUSERSITE</key>
+    <string>1</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$ROOT/logs/$MODEL_SERVICE_LABEL.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$ROOT/logs/$MODEL_SERVICE_LABEL.err.log</string>
+</dict>
+</plist>
+PLIST
 
 cat >"$AGENT_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -211,9 +257,11 @@ cat >"$AGENT_PLIST" <<PLIST
 </plist>
 PLIST
 
-plutil -lint "$AGENT_PLIST" >/dev/null
+plutil -lint "$MODEL_SERVICE_PLIST" "$AGENT_PLIST" >/dev/null
+launchctl bootout "gui/$UID_VALUE" "$MODEL_SERVICE_PLIST" >/dev/null 2>&1 || true
 launchctl bootout "gui/$UID_VALUE" "$AGENT_PLIST" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$UID_VALUE" "$MODEL_SERVICE_PLIST"
 launchctl bootstrap "gui/$UID_VALUE" "$AGENT_PLIST"
 
-echo "Installed and started Codex Voice single LaunchAgent: $AGENT_LABEL"
+echo "Installed and started Codex Voice LaunchAgents: $MODEL_SERVICE_LABEL, $AGENT_LABEL"
 echo "Codex Voice Python: $PYTHON_BIN"

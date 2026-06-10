@@ -17,10 +17,7 @@ final class CodexVoicePanelController: NSViewController {
     var onSelectTranscriptionModel: ((String) -> Void)?
     var onSelectCorrectionModel: ((String) -> Void)?
     var onSelectInputDevice: ((String) -> Void)?
-    var onWarmTranscriptionModel: (() -> Void)?
-    var onWarmCorrectionModel: (() -> Void)?
-    var onUnloadCorrectionModel: (() -> Void)?
-    var onUnloadOllamaModel: ((String) -> Void)?
+    var onUnloadLocalModel: ((String) -> Void)?
     var onProbeInput: (() -> Void)?
     var onSetMaxMinutes: ((Double) -> Void)?
     var onSetNativeHotkey: ((NativeHotkey) -> Void)?
@@ -59,8 +56,9 @@ final class CodexVoicePanelController: NSViewController {
     private var currentConfig: [String: Any] = [:]
     private var currentModelTask: ModelTask?
     private var currentInputDevices: [InputDevice] = []
-    private var currentTranscriptionModels: [OllamaModel] = []
-    private var currentCorrectionModels: [OllamaModel] = []
+    private var currentDirectASRModels: [LocalModel] = []
+    private var currentTranscriptionModels: [LocalModel] = []
+    private var currentCorrectionModels: [LocalModel] = []
     private var currentInputProbeResult = ""
     private var inputProbeInFlight = false
     private var scanningModels = false
@@ -68,9 +66,9 @@ final class CodexVoicePanelController: NSViewController {
     private var currentMaintenance = PanelMaintenance(
         pythonPath: "",
         launchAgentStatus: "com.codexvoice.agent",
-        ollamaStatus: "",
-        ollamaStatusCode: "scanning",
-        ollamaBaseURL: ""
+        modelServiceStatus: "",
+        modelServiceStatusCode: "scanning",
+        modelServiceSocket: ""
     )
 
     private var transcriptionSignature = ""
@@ -201,8 +199,9 @@ final class CodexVoicePanelController: NSViewController {
         config: [String: Any],
         modelTask: ModelTask?,
         inputDevices: [InputDevice],
-        transcriptionModels: [OllamaModel],
-        correctionModels: [OllamaModel],
+        directASRModels: [LocalModel],
+        transcriptionModels: [LocalModel],
+        correctionModels: [LocalModel],
         inputProbeResult: String,
         isInputProbeInFlight: Bool,
         isScanningModels: Bool,
@@ -216,6 +215,7 @@ final class CodexVoicePanelController: NSViewController {
         currentConfig = config
         currentModelTask = modelTask
         currentInputDevices = inputDevices
+        currentDirectASRModels = directASRModels
         currentTranscriptionModels = transcriptionModels
         currentCorrectionModels = correctionModels
         currentInputProbeResult = inputProbeResult
@@ -481,6 +481,7 @@ final class CodexVoicePanelController: NSViewController {
         tabControl.setLabel(t("panel.tab.transcription"), forSegment: 0)
         tabControl.setLabel(t("panel.tab.correction"), forSegment: 1)
         tabControl.setLabel(t("panel.tab.input"), forSegment: 2)
+        tabControl.setEnabled(true, forSegment: 1)
         refreshLanguagePopup()
         refreshMaxMinutesPopupItems()
     }
@@ -623,13 +624,18 @@ final class CodexVoicePanelController: NSViewController {
 
     private func refreshDynamicModelSections() {
         let languageSignature = CodexVoiceI18n.resolved(config: currentConfig)
+        let route = processingRoute()
+        let directSelection = stringConfig("direct_asr_model", defaultValue: "")
+        let transcriptionSelection = stringConfig("transcription_model", defaultValue: "")
+        let primaryModels = primaryModelRows()
         let transcriptionSig = [
             languageSignature,
-            transcriptionProfile(),
-            stringConfig("ollama_transcription_model", defaultValue: ""),
-            currentTranscriptionModels.isEmpty && scanningModels ? "scanning" : "ready",
-            currentTranscriptionModels.map {
-                "\($0.name):\($0.needsTest):\($0.parameterSize):\($0.family):\($0.quantization)"
+            route,
+            directSelection,
+            transcriptionSelection,
+            primaryModels.isEmpty && scanningModels ? "scanning" : "ready",
+            primaryModels.map {
+                "\($0.prefix):\($0.model.id):\($0.model.installed):\($0.model.loaded):\($0.model.parameterSize):\($0.model.architecture):\($0.model.quantization)"
             }.joined(separator: "|")
         ].joined(separator: "||")
         if transcriptionSig != transcriptionSignature {
@@ -645,13 +651,14 @@ final class CodexVoicePanelController: NSViewController {
 
         let correctionSig = [
             languageSignature,
-            correctionProfile(),
-            stringConfig("ollama_model", defaultValue: ""),
-            currentMaintenance.ollamaStatusCode,
-            currentMaintenance.ollamaBaseURL,
+            route,
+            configBool("correction_enabled", defaultValue: false) ? "enabled" : "disabled",
+            stringConfig("correction_model", defaultValue: ""),
+            currentMaintenance.modelServiceStatusCode,
+            currentMaintenance.modelServiceSocket,
             currentCorrectionModels.isEmpty && scanningModels ? "scanning" : "ready",
             currentCorrectionModels.map {
-                "\($0.name):\($0.loaded):\($0.parameterSize):\($0.family):\($0.quantization)"
+                "\($0.id):\($0.installed):\($0.loaded):\($0.parameterSize):\($0.architecture):\($0.quantization)"
             }.joined(separator: "|")
         ].joined(separator: "||")
         if correctionSig != correctionSignature {
@@ -687,153 +694,97 @@ final class CodexVoicePanelController: NSViewController {
     private func rebuildTranscriptionOptions() {
         removeAllArrangedSubviews(from: transcriptionCardsStack)
 
-        let profile = transcriptionProfile()
-        let selectedOllama = stringConfig("ollama_transcription_model", defaultValue: "")
-        transcriptionCardsStack.addArrangedSubview(cardButton(
-            source: t("card.builtin"),
-            title: "MLX Whisper large-v3-turbo",
-            parameter: "809M",
-            architecture: "Whisper Transformer",
-            vendor: "OpenAI / MLX",
-            value: "profile:mlx-whisper-turbo",
-            selected: profile == "mlx-whisper-turbo",
-            action: #selector(transcriptionChoiceClicked(_:))
-        ))
-        transcriptionCardsStack.addArrangedSubview(cardButton(
-            source: t("card.builtin"),
-            title: "faster-whisper large-v3-turbo",
-            parameter: "809M",
-            architecture: "Whisper Transformer",
-            vendor: "OpenAI / CTranslate2",
-            value: "profile:faster-whisper-turbo",
-            selected: profile == "faster-whisper-turbo",
-            action: #selector(transcriptionChoiceClicked(_:))
-        ))
-
+        let route = processingRoute()
+        let models = primaryModelRows()
+        let directSelection = stringConfig("direct_asr_model", defaultValue: "")
+        let transcriptionSelection = stringConfig("transcription_model", defaultValue: "")
         if scanningModels {
             transcriptionCardsStack.addArrangedSubview(statusCard(
-                t("card.ollama"),
+                t("card.localModel"),
                 t("card.scanning"),
                 "-",
                 "-",
-                "Ollama"
+                "-"
             ))
-        } else if currentTranscriptionModels.isEmpty {
+        } else if models.isEmpty {
             transcriptionCardsStack.addArrangedSubview(statusCard(
-                t("card.ollama"),
+                t("card.localModel"),
                 t("card.noTranscription"),
                 "-",
-                "-",
-                "Ollama"
+                currentMaintenance.modelServiceStatus,
+                "-"
             ))
         } else {
-            for model in currentTranscriptionModels {
-                let suffix = model.needsTest ? t("card.needsTest") : ""
+            for item in models {
+                let model = item.model
+                let title = model.installed
+                    ? model.name
+                    : t("card.notInstalled", ["model": model.name])
+                let selected = item.prefix == "direct"
+                    ? route == "direct_asr" && directSelection == model.id
+                    : route == "two_stage" && transcriptionSelection == model.id
                 transcriptionCardsStack.addArrangedSubview(cardButton(
-                    source: t("card.ollama"),
-                    title: "\(model.name)\(suffix)",
+                    source: t("card.localModel"),
+                    title: title,
+                    modelType: localizedModelType(model.modelType),
                     parameter: parameterText(for: model),
                     architecture: architectureText(for: model),
                     vendor: vendorText(for: model),
-                    value: "ollama:\(model.name)",
-                    selected: profile == "ollama-transcription" && selectedOllama == model.name,
-                    action: #selector(transcriptionChoiceClicked(_:))
+                    value: "\(item.prefix):\(model.id)",
+                    selected: selected,
+                    action: #selector(transcriptionChoiceClicked(_:)),
+                    enabled: true,
+                    modelID: model.id,
+                    unloadValue: model.loaded ? model.id : nil,
+                    unloadAction: #selector(unloadLocalModelClicked(_:))
                 ))
             }
         }
-        transcriptionCardsStack.addArrangedSubview(cardButton(
-            source: t("card.onlineAPI"),
-            title: t("card.openaiDisabled"),
-            parameter: t("card.cloud"),
-            architecture: "Audio API",
-            vendor: "OpenAI",
-            value: "external:openai-transcription",
-            selected: false,
-            action: #selector(transcriptionChoiceClicked(_:)),
-            enabled: false
-        ))
     }
 
     private func rebuildCorrectionOptions() {
         removeAllArrangedSubviews(from: correctionCardsStack)
 
-        let profile = correctionProfile()
-        let selectedOllama = stringConfig("ollama_model", defaultValue: "")
-        correctionCardsStack.addArrangedSubview(cardButton(
-            source: t("card.builtin"),
-            title: t("card.ruleCorrection"),
-            parameter: "0",
-            architecture: t("card.ruleEngine"),
-            vendor: "Codex Voice",
-            value: "profile:rule-only",
-            selected: profile == "rule-only",
-            action: #selector(correctionChoiceClicked(_:))
-        ))
-
+        let enabled = configBool("correction_enabled", defaultValue: false)
+        let selected = stringConfig("correction_model", defaultValue: "")
         if scanningModels {
             correctionCardsStack.addArrangedSubview(statusCard(
-                t("card.ollama"),
+                t("card.localModel"),
                 t("card.scanning"),
                 "-",
                 "-",
-                "Ollama"
+                "-"
             ))
         } else if currentCorrectionModels.isEmpty {
             correctionCardsStack.addArrangedSubview(statusCard(
-                t("card.ollama"),
-                ollamaEmptyCorrectionTitle(selectedModel: selectedOllama),
-                ollamaStatusParameter(),
-                currentMaintenance.ollamaStatus,
-                "Ollama"
+                t("card.localModel"),
+                t("card.noCorrection"),
+                "-",
+                currentMaintenance.modelServiceStatus,
+                "-"
             ))
         } else {
             for model in currentCorrectionModels {
-                let suffix = model.loaded ? "" : t("card.notLoaded")
+                let title = model.installed
+                    ? model.name
+                    : t("card.notInstalled", ["model": model.name])
                 correctionCardsStack.addArrangedSubview(cardButton(
-                    source: t("card.ollama"),
-                    title: "\(model.name)\(suffix)",
+                    source: t("card.localModel"),
+                    title: title,
+                    modelType: localizedModelType(model.modelType),
                     parameter: parameterText(for: model),
                     architecture: architectureText(for: model),
                     vendor: vendorText(for: model),
-                    value: "ollama:\(model.name)",
-                    selected: profile == "ollama-correction" && selectedOllama == model.name,
+                    value: "correction:\(model.id)",
+                    selected: enabled && selected == model.id,
                     action: #selector(correctionChoiceClicked(_:)),
-                    unloadValue: model.loaded ? model.name : nil,
-                    unloadAction: #selector(unloadOllamaModelClicked(_:))
+                    enabled: true,
+                    modelID: model.id,
+                    unloadValue: model.loaded ? model.id : nil,
+                    unloadAction: #selector(unloadLocalModelClicked(_:))
                 ))
             }
         }
-        correctionCardsStack.addArrangedSubview(cardButton(
-            source: t("card.onlineAPI"),
-            title: t("card.openaiDisabled"),
-            parameter: t("card.cloud"),
-            architecture: "Chat API",
-            vendor: "OpenAI",
-            value: "external:openai-correction",
-            selected: false,
-            action: #selector(correctionChoiceClicked(_:)),
-            enabled: false
-        ))
-    }
-
-    private func ollamaEmptyCorrectionTitle(selectedModel: String) -> String {
-        switch currentMaintenance.ollamaStatusCode {
-        case "ollama_not_installed":
-            return t("card.noCorrection")
-        case "service_unavailable":
-            return t("card.ollamaNotReady")
-        case "starting":
-            return t("card.startingOllama")
-        default:
-            if !selectedModel.isEmpty {
-                return t("card.notInstalled", ["model": selectedModel])
-            }
-            return t("card.noAvailableCorrection")
-        }
-    }
-
-    private func ollamaStatusParameter() -> String {
-        currentMaintenance.ollamaBaseURL.isEmpty ? "-" : currentMaintenance.ollamaBaseURL
     }
 
     private func rebuildInputOptions() {
@@ -850,6 +801,7 @@ final class CodexVoicePanelController: NSViewController {
         inputCardsStack.addArrangedSubview(cardButton(
             source: t("card.default"),
             title: defaultTitle,
+            modelType: t("card.input"),
             parameter: t("card.auto"),
             architecture: t("card.coreAudio"),
             vendor: t("card.macOS"),
@@ -878,6 +830,7 @@ final class CodexVoicePanelController: NSViewController {
                 inputCardsStack.addArrangedSubview(cardButton(
                     source: t("card.microphone"),
                     title: title,
+                    modelType: t("card.microphone"),
                     parameter: channels,
                     architecture: t("card.coreAudioInput"),
                     vendor: device.isDefault ? t("card.macOSDefault") : t("card.audioDevice"),
@@ -949,7 +902,10 @@ final class CodexVoicePanelController: NSViewController {
     }
 
     private func refreshCardLoadingOverlays() {
-        let runningTask = currentModelTask?.status == "running" ? currentModelTask : nil
+        let runningTask = currentModelTask?.status == "running"
+            && ["download", "load"].contains(currentModelTask?.phase ?? "")
+            ? currentModelTask
+            : nil
         updateLoadingOverlay(
             in: transcriptionCardsStack,
             task: runningTask?.scope == "transcription" ? runningTask : nil
@@ -966,7 +922,8 @@ final class CodexVoicePanelController: NSViewController {
             guard let card = view as? CardChoiceView else {
                 continue
             }
-            card.setLoadingTask(card.isSelectedCard ? task : nil, config: currentConfig)
+            let matchingTask = task?.modelID == card.modelID ? task : nil
+            card.setLoadingTask(matchingTask, config: currentConfig)
         }
     }
 
@@ -1068,6 +1025,7 @@ final class CodexVoicePanelController: NSViewController {
     private func cardButton(
         source: String,
         title: String,
+        modelType: String? = nil,
         parameter: String,
         architecture: String,
         vendor: String,
@@ -1075,23 +1033,32 @@ final class CodexVoicePanelController: NSViewController {
         selected: Bool,
         action: Selector,
         enabled: Bool = true,
+        modelID: String? = nil,
         unloadValue: String? = nil,
         unloadAction: Selector? = nil,
         width: CGFloat = Metrics.modelCardWidth
     ) -> NSView {
+        var rows: [(String, String)] = []
+        if let modelType {
+            rows.append((t("card.type"), modelType))
+        }
+        rows.append(contentsOf: [
+            (t("card.parameter"), parameter),
+            (t("card.architecture"), architecture),
+            (t("card.vendor"), vendor)
+        ])
         let card = CardChoiceView(
             source: source,
             title: title,
-            rows: [
-                (t("card.parameter"), parameter),
-                (t("card.architecture"), architecture),
-                (t("card.vendor"), vendor)
-            ],
+            rows: rows,
             selected: selected,
             enabled: enabled,
             width: width
         )
         card.identifier = NSUserInterfaceItemIdentifier(value)
+        if let modelID {
+            card.setModelID(modelID)
+        }
         if enabled {
             card.target = self
             card.action = action
@@ -1114,6 +1081,7 @@ final class CodexVoicePanelController: NSViewController {
             source: source,
             title: title,
             rows: [
+                (t("card.type"), source),
                 (t("card.parameter"), parameter),
                 (t("card.architecture"), architecture),
                 (t("card.vendor"), vendor)
@@ -1154,40 +1122,38 @@ final class CodexVoicePanelController: NSViewController {
         return uniformHeight
     }
 
-    private func parameterText(for model: OllamaModel) -> String {
+    private func parameterText(for model: LocalModel) -> String {
         if !model.parameterSize.isEmpty {
             return model.parameterSize
         }
         return t("card.unknown")
     }
 
-    private func architectureText(for model: OllamaModel) -> String {
-        let base: String
-        if !model.family.isEmpty {
-            base = model.family
-        } else if let first = model.families.first, !first.isEmpty {
-            base = first
-        } else {
-            base = inferredArchitecture(from: model.name)
-        }
+    private func architectureText(for model: LocalModel) -> String {
+        let base = model.architecture.isEmpty
+            ? inferredArchitecture(from: model.name)
+            : model.architecture
         if model.quantization.isEmpty {
             return base
         }
         return "\(base) · \(model.quantization)"
     }
 
-    private func vendorText(for model: OllamaModel) -> String {
-        let text = ([model.name, model.family] + model.families).joined(separator: " ").lowercased()
-        if text.contains("qwen") { return "Alibaba / Qwen" }
-        if text.contains("gemma") { return "Google" }
-        if text.contains("llama") { return "Meta" }
-        if text.contains("mistral") { return "Mistral AI" }
-        if text.contains("deepseek") { return "DeepSeek" }
-        if text.contains("phi") { return "Microsoft" }
-        if text.contains("whisper") { return "OpenAI / Community" }
-        if text.contains("yi") { return "01.AI" }
-        if text.contains("baichuan") { return "Baichuan" }
-        return "Ollama"
+    private func vendorText(for model: LocalModel) -> String {
+        model.vendor.isEmpty ? t("card.unknown") : model.vendor
+    }
+
+    private func localizedModelType(_ type: String) -> String {
+        switch type {
+        case "direct_asr":
+            return t("card.type.transcription")
+        case "transcription":
+            return t("card.type.transcription")
+        case "text_correction":
+            return t("card.type.textCorrection")
+        default:
+            return type.isEmpty ? t("card.unknown") : type
+        }
     }
 
     private func inferredArchitecture(from name: String) -> String {
@@ -1634,63 +1600,32 @@ final class CodexVoicePanelController: NSViewController {
         }
     }
 
-    private func transcriptionProfile() -> String {
-        if let profile = currentConfig["transcription_profile"] as? String, !profile.isEmpty {
-            return profile
-        }
-        let backend = stringConfig("whisper_backend", defaultValue: "mlx-whisper")
-        if backend == "mlx-whisper" {
-            return "mlx-whisper-turbo"
-        }
-        if backend == "faster-whisper" {
-            return "faster-whisper-turbo"
-        }
-        if backend == "ollama" {
-            return "ollama-transcription"
-        }
-        return backend
-    }
-
-    private func correctionProfile() -> String {
-        if let profile = currentConfig["correction_profile"] as? String, !profile.isEmpty {
-            return profile
-        }
-        let backend = stringConfig("correction_backend", defaultValue: "ollama")
-        if backend == "ollama" {
-            return "ollama-correction"
-        }
-        if backend == "rule-only" || backend == "none" {
-            return "rule-only"
-        }
-        return backend
+    private func processingRoute() -> String {
+        stringConfig("processing_route", defaultValue: "direct_asr")
     }
 
     private func transcriptionLabel() -> String {
-        switch transcriptionProfile() {
-        case "mlx-whisper-turbo":
-            return "MLX Whisper large-v3-turbo"
-        case "faster-whisper-turbo":
-            return "faster-whisper large-v3-turbo"
-        case "ollama-transcription":
-            let model = stringConfig("ollama_transcription_model", defaultValue: "")
-            return model.isEmpty ? t("label.ollamaTranscriptionMissing") : "Ollama · \(model)"
-        default:
-            let backend = stringConfig("whisper_backend", defaultValue: "mlx-whisper")
-            let model = stringConfig("whisper_model", defaultValue: "")
-            return model.isEmpty ? backend : "\(backend) · \(model)"
-        }
+        let direct = processingRoute() == "direct_asr"
+        let modelID = direct
+            ? stringConfig("direct_asr_model", defaultValue: "")
+            : stringConfig("transcription_model", defaultValue: "")
+        let models = direct ? currentDirectASRModels : currentTranscriptionModels
+        return models.first(where: { $0.id == modelID })?.name
+            ?? (modelID.isEmpty ? t("card.noTranscription") : modelID)
+    }
+
+    private func primaryModelRows() -> [(prefix: String, model: LocalModel)] {
+        currentDirectASRModels.map { (prefix: "direct", model: $0) }
+            + currentTranscriptionModels.map { (prefix: "transcription", model: $0) }
     }
 
     private func correctionLabel() -> String {
-        switch correctionProfile() {
-        case "rule-only":
-            return t("label.ruleCorrection")
-        case "ollama-correction":
-            let model = stringConfig("ollama_model", defaultValue: "")
-            return model.isEmpty ? t("label.ollamaCorrectionMissing") : "Ollama · \(model)"
-        default:
-            return stringConfig("correction_backend", defaultValue: t("label.ruleCorrection"))
+        if !configBool("correction_enabled", defaultValue: false) {
+            return t("label.correctionNotUsed")
         }
+        let modelID = stringConfig("correction_model", defaultValue: "")
+        return currentCorrectionModels.first(where: { $0.id == modelID })?.name
+            ?? (modelID.isEmpty ? t("card.noCorrection") : modelID)
     }
 
     private func inputLabel() -> String {
@@ -1924,23 +1859,11 @@ final class CodexVoicePanelController: NSViewController {
         onSelectInputDevice?(value)
     }
 
-    @objc private func warmTranscriptionClicked(_ sender: Any?) {
-        onWarmTranscriptionModel?()
-    }
-
-    @objc private func warmCorrectionClicked(_ sender: Any?) {
-        onWarmCorrectionModel?()
-    }
-
-    @objc private func unloadCorrectionClicked(_ sender: Any?) {
-        onUnloadCorrectionModel?()
-    }
-
-    @objc private func unloadOllamaModelClicked(_ sender: NSControl) {
+    @objc private func unloadLocalModelClicked(_ sender: NSControl) {
         guard let model = sender.identifier?.rawValue, !model.isEmpty else {
             return
         }
-        onUnloadOllamaModel?(model)
+        onUnloadLocalModel?(model)
     }
 
     @objc private func probeInputClicked(_ sender: Any?) {

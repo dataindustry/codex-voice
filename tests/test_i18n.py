@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ def test_config_migration_adds_ui_language() -> None:
     migrated = migrate_config({"config_version": 2})
 
     assert migrated["ui_language"] == "system"
+    assert migrated["processing_route"] == "two_stage"
 
 
 def test_system_language_resolution_maps_supported_locales() -> None:
@@ -90,3 +92,22 @@ def test_python_i18n_keys_are_complete() -> None:
     english_keys = set(TRANSLATIONS["en"])
     for language in ["zh-Hans", "zh-Hant", "ja"]:
         assert english_keys <= set(TRANSLATIONS[language])
+
+
+def test_swift_i18n_keys_are_complete() -> None:
+    source = Path("Sources/Agent/I18n.swift").read_text(encoding="utf-8")
+    language_matches = list(re.finditer(r'^        "([^"]+)": \[', source, re.M))
+    tables: dict[str, set[str]] = {}
+    for index, match in enumerate(language_matches):
+        language = match.group(1)
+        end = language_matches[index + 1].start() if index + 1 < len(language_matches) else source.rfind("\n        ]")
+        block = source[match.start() : end]
+        tables[language] = set(re.findall(r'^\s+"([^"]+)":\s+"', block, re.M))
+
+    assert {"en", "zh-Hans", "ja"} <= set(tables)
+    assert 'values["zh-Hant"] = simplified.mapValues' in source
+    english_keys = tables["en"]
+    assert "task.downloading_model" in english_keys
+    assert "task.loading_model" in english_keys
+    for language in ["zh-Hans", "ja"]:
+        assert tables[language] == english_keys

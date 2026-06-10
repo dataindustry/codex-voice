@@ -10,11 +10,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "mlx-whisper>=0.4.2",
-  "faster-whisper>=1.1.1",
+  "mlx-qwen3-asr>=0.3.3",
+  "mlx-lm>=0.31.3",
+  "modelscope>=1.37.1",
   "sounddevice>=0.5.1",
   "numpy>=1.26",
   "pyperclip>=1.9",
-  "requests>=2.32",
   "opencc-python-reimplemented>=0.1.7",
 ]
 
@@ -23,12 +24,12 @@ dev = [
   "pytest>=8.2",
   "ruff>=0.6",
   "mypy>=1.11",
-  "types-requests>=2.32",
 ]
 
 [project.scripts]
 codex-voice = "codex_voice.voice:main"
 codex-voice-config = "codex_voice.config_cli:main"
+codex-voice-model-service = "codex_voice.model_service:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

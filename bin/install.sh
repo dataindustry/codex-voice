@@ -4,14 +4,22 @@ set -euo pipefail
 ROOT="${CODEX_VOICE_HOME:-$HOME/CodexVoice}"
 CONDA_ENV_NAME="${CODEX_VOICE_CONDA_ENV:-codex-voice}"
 SKIP_DEPS=0
+SKIP_MODELS=0
+DOWNLOAD_MODELS=0
 
 for arg in "$@"; do
   case "$arg" in
     --skip-deps)
       SKIP_DEPS=1
       ;;
+    --skip-models)
+      SKIP_MODELS=1
+      ;;
+    --download-models)
+      DOWNLOAD_MODELS=1
+      ;;
     -h|--help)
-      echo "Usage: bash ~/CodexVoice/bin/install.sh [--skip-deps]"
+      echo "Usage: bash ~/CodexVoice/bin/install.sh [--skip-deps] [--skip-models|--download-models]"
       exit 0
       ;;
     *)
@@ -41,6 +49,7 @@ ensure_layout() {
     "$ROOT/recordings" \
     "$ROOT/transcripts" \
     "$ROOT/logs" \
+    "$ROOT/models" \
     "$ROOT/state"
 }
 
@@ -120,21 +129,6 @@ check_homebrew_tools() {
   fi
 }
 
-check_ollama() {
-  if ! command -v ollama >/dev/null 2>&1; then
-    warn "Ollama not found. Install from https://ollama.com/ if you want local LLM correction."
-    return
-  fi
-
-  log "Ollama found: $(command -v ollama)"
-  local models
-  models="$(ollama list 2>/dev/null || true)"
-  if [[ "$models" != *"qwen3.6:35b-a3b"* ]]; then
-    warn "Default model qwen3.6:35b-a3b is not installed."
-    warn "Either edit $ROOT/config/config.json or run: ollama pull qwen3.6:35b-a3b"
-  fi
-}
-
 install_conda_deps() {
   if [[ "$SKIP_DEPS" -eq 1 ]]; then
     warn "Skipping Conda environment install/update because --skip-deps was provided."
@@ -156,6 +150,34 @@ install_conda_deps() {
   PYTHONNOUSERSITE=1 "$python_bin" -m pip install -e "$ROOT[dev]"
 }
 
+install_models() {
+  local python_bin="$1"
+  if [[ "$SKIP_MODELS" -eq 1 ]]; then
+    warn "Skipping local model download because --skip-models was provided."
+    return
+  fi
+
+  local should_download="$DOWNLOAD_MODELS"
+  if [[ "$should_download" -eq 0 && -t 0 ]]; then
+    printf '[CodexVoice] Download the default Qwen3-ASR, Whisper, and Qwen3.6 models from ModelScope (~25 GB)? [y/N] '
+    read -r answer
+    case "$answer" in
+      y|Y|yes|YES)
+        should_download=1
+        ;;
+    esac
+  fi
+  if [[ "$should_download" -eq 0 ]]; then
+    warn "Models were not downloaded. Run install.sh --download-models before recording."
+    return
+  fi
+
+  log "Downloading default models from ModelScope. Existing complete snapshots are reused."
+  PYTHONNOUSERSITE=1 "$python_bin" "$ROOT/bin/codex-voice-config.py" \
+    --root "$ROOT" \
+    --download-default-models
+}
+
 set_permissions() {
   chmod +x "$ROOT/bin/codex-voice.py"
   chmod +x "$ROOT/bin/install.sh"
@@ -175,13 +197,15 @@ main() {
   ensure_layout
   ensure_required_files
   check_homebrew_tools
-  check_ollama
 
   local conda_bin
   conda_bin="$(find_conda)" || die "Conda not found. Install Anaconda/Miniconda/Miniforge or set CONDA_EXE."
   log "Using Conda: $conda_bin"
 
   install_conda_deps "$conda_bin"
+  local python_bin
+  python_bin="$(conda_python "$conda_bin")"
+  install_models "$python_bin"
   set_permissions
   cleanup_legacy_artifacts
   CODEX_VOICE_CONDA_ENV="$CONDA_ENV_NAME" "$ROOT/bin/install-launch-agents.sh"

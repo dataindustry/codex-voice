@@ -14,11 +14,12 @@ Languages: English | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-
 
 - Built-in global hotkey: default `Option + Space`; record a different combination from the menu bar panel.
 - macOS menu bar panel: recording controls, permissions, models, input devices, logs, and model management in one popover.
-- Four-language workflow: the UI language setting also controls Whisper recognition language, Ollama correction prompts, CLI user output, and final output script.
-- Local transcription: defaults to Apple Silicon-friendly `mlx-whisper` large-v3-turbo with a `faster-whisper` fallback.
-- Local correction: defaults to Ollama `qwen3.6:35b-a3b` for conservative correction of recognition errors, technical terms, and formatting.
+- Unified transcription tab: choose Qwen3-ASR or MLX Whisper from the same model picker.
+- Optional MLX correction: Qwen3.6 text correction can be enabled after either transcription model, and clicking the selected correction card again disables it.
+- Four-language workflow: the UI language setting controls ASR language, correction prompts, CLI user output, and final output script.
+- Persistent local MLX service: models stay loaded when the menu bar Agent exits and can be unloaded explicitly from the UI.
 - Unified paste behavior: always writes final text to the clipboard first; sends `Cmd+V` only when the focused element is editable.
-- Model management: can start Ollama, load the configured qwen model, keep it alive, and unload loaded models from the UI.
+- Model management: download from ModelScope, load models into MLX memory, inspect residency, and unload models from the UI.
 
 ## How It Works
 
@@ -30,9 +31,10 @@ com.codexvoice.agent LaunchAgent
         |
         +-- recording, submit, cancel, menu bar UI
         +-- UI/runtime language resolution
-        +-- Whisper transcription in the resolved language
-        +-- deterministic term replacement from terms.json
-        +-- Ollama local LLM correction in the resolved language
+        +-- transcription: Qwen3-ASR or MLX Whisper
+        +-- deterministic terms/rules
+        +-- optional Qwen3.6 text correction
+        +-- persistent MLX model service shared by all local models
         +-- pbcopy to clipboard
         +-- Cmd+V only when the current focus is editable
 ```
@@ -40,10 +42,9 @@ com.codexvoice.agent LaunchAgent
 ## Requirements
 
 - macOS 13 or newer.
-- Apple Silicon Mac recommended. Intel Macs can work, but local transcription may be much slower.
+- Apple Silicon Mac. The local MLX runtime is designed for Apple Silicon.
 - Conda, Miniconda, Miniforge, or Anaconda.
 - Homebrew with `ffmpeg` and `portaudio` recommended.
-- Ollama is optional but strongly recommended for local LLM correction.
 
 ## Installation
 
@@ -65,12 +66,12 @@ bash ~/CodexVoice/bin/install.sh
 
 The installer will:
 
-- Create `bin/`, `config/`, `recordings/`, `transcripts/`, `logs/`, and `state/`.
-- Check Homebrew, `ffmpeg`, `portaudio`, and Ollama.
+- Create `bin/`, `config/`, `models/`, `recordings/`, `transcripts/`, `logs/`, and `state/`.
+- Check Homebrew, `ffmpeg`, and `portaudio`.
 - Create or update the `codex-voice` Conda environment.
 - Install Codex Voice as an editable Python package from `pyproject.toml`, including test and lint tools.
 - Mark the main program and install scripts executable.
-- Compile and start the `com.codexvoice.agent` LaunchAgent.
+- Compile and start the `com.codexvoice.agent` and `com.codexvoice.model-service` LaunchAgents.
 - Compile the native Swift recording indicator and menu bar Agent.
 
 To rebuild the Agent without reinstalling Python dependencies:
@@ -89,14 +90,14 @@ launchctl print gui/$(id -u)/com.codexvoice.agent
 
 Use this section when asking an AI coding agent to install Codex Voice on the same Mac.
 
-Goal: install or update Codex Voice under `~/CodexVoice`, keep user configuration intact where possible, compile the menu bar Agent, and verify native hotkey/Ollama integration.
+Goal: install or update Codex Voice under `~/CodexVoice`, keep user configuration intact, compile the menu bar Agent, and verify the native hotkey and persistent MLX model service.
 
 Rules for the agent:
 
 - Do not delete `~/CodexVoice/config/terms.json`, `transcripts/`, recordings, logs, state, or user-edited config unless explicitly asked.
 - Do not run destructive git commands such as `git reset --hard`.
 - If the repo is cloned elsewhere, sync source files to `~/CodexVoice` before running the installer.
-- If Ollama is missing, report it and show the `ollama pull qwen3.6:35b-a3b` command; do not download large models without permission.
+- Do not download the default model set unless the user approves roughly 25 GB of downloads.
 
 Recommended commands:
 
@@ -112,7 +113,8 @@ Verification commands:
 launchctl print gui/$(id -u)/com.codexvoice.agent
 codex-voice --status
 codex-voice-config --show
-codex-voice-config --list-ollama-models
+codex-voice-config --list-models
+launchctl print gui/$(id -u)/com.codexvoice.model-service
 ```
 
 After installation, the human user must grant Microphone and Accessibility permissions in macOS System Settings. The default built-in hotkey is `Option + Space`.
@@ -172,7 +174,7 @@ When the hotkey is pressed, the Agent directly calls `codex-voice.py --toggle`. 
 
 Codex Voice does not auto-detect the speaker language. The language selected in the settings overlay is the product policy for the whole pipeline:
 
-| Setting | Whisper language | Correction/output behavior |
+| Setting | ASR language | Correction/output behavior |
 | --- | --- | --- |
 | `Follow System` | Resolved from macOS preferred languages; unsupported system languages fall back to English. | Uses the resolved language below. |
 | `English` | `en` | Corrects and outputs English. |
@@ -190,57 +192,38 @@ codex-voice-config --set-ui-language zh-Hant
 codex-voice-config --set-ui-language ja
 ```
 
-## Ollama Setup
+## Transcription And Local Models
 
-After installing Ollama, pull the recommended correction model:
+All selectable speech and correction models are internal MLX models. OpenAI-compatible, Ollama-hosted, and non-MLX Whisper choices are not shown in the model picker.
 
-```bash
-ollama pull qwen3.6:35b-a3b
-```
+The first model tab is always `Transcription Model`:
 
-If Ollama is not running on the default `127.0.0.1:11434`, set a launchd environment variable and restart the Agent:
+- `Qwen3-ASR-1.7B`: direct end-to-end ASR, selected by default for new installs.
+- `Whisper large-v3-turbo`: MLX Whisper transcription, useful as a mature fallback for accents, microphones, or vocabulary where Qwen3-ASR is weaker.
 
-```bash
-launchctl setenv OLLAMA_HOST 127.0.0.1:11435
-bash ~/CodexVoice/bin/install-launch-agents.sh
-```
+The correction tab is optional. Select `Qwen3.6-35B-A3B-4bit` to run text correction after the selected transcription model. Click the selected correction card again to turn correction off and keep only deterministic `terms.json` rules.
 
-Codex Voice resolves the Ollama base URL in this order:
+For compatibility, the config still stores `processing_route`: choosing Qwen3-ASR sets it to `direct_asr`; choosing Whisper sets it to `two_stage`. Users normally change this from the transcription cards rather than editing the field directly.
 
-1. `OLLAMA_HOST`
-2. `launchctl getenv OLLAMA_HOST`
-3. Explicit non-default `ollama_base_url` or `ollama_url` in config
-4. Default `http://127.0.0.1:11434`
-
-Inspect detected models:
+All model snapshots are downloaded from ModelScope into `~/CodexVoice/models`. The installer asks before downloading the complete default set:
 
 ```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --list-ollama-models
+bash ~/CodexVoice/bin/install.sh --download-models
+codex-voice-config --list-models
 ```
 
-Warm the current correction model:
+You can download one model or warm the currently selected transcription/correction set separately:
 
 ```bash
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --prepare-current-correction-model
+codex-voice-config --download-model qwen3-asr-1.7b-8bit
+codex-voice-config --download-model whisper-large-v3-turbo
+codex-voice-config --download-model qwen3.6-35b-a3b-4bit
+codex-voice-config --prepare-current-route-models
 ```
 
-Key default correction settings:
+Clicking a not-yet-installed model card starts the download immediately and shows a system progress bar labeled `Downloading model`. Clicking an installed but unloaded model loads it into memory and shows a system progress bar labeled `Loading model`.
 
-```json
-"ollama_model": "qwen3.6:35b-a3b",
-"ollama_num_ctx": 4000,
-"ollama_num_predict": 256,
-"ollama_keep_alive": -1,
-"ollama_timeout_seconds": 7,
-"ollama_skip_simple_utterances": true
-```
-
-Notes:
-
-- `keep_alive: -1` is an Ollama request parameter. It asks Ollama to keep the qwen model in memory. It is unrelated to macOS LaunchAgent `KeepAlive`.
-- `num_ctx: 4000` targets ordinary correction of transcripts from voice recordings up to about ten minutes. Very long transcripts should still be split.
-- If Ollama is installed but the service is not running, the Agent will try to start or wake it.
-- If the default qwen model is not installed, the UI shows a localized "not installed" card for `qwen3.6:35b-a3b`. Codex Voice does not automatically download large models.
+The `com.codexvoice.model-service` process owns loaded MLX models. Closing the menu bar Agent leaves the service and its models resident. The card `X` unloads one model; `Unload And Quit` stops the service and releases all loaded models.
 
 ## Model Recommendations
 
@@ -248,24 +231,22 @@ Transcription models:
 
 | Model | Recommendation | Notes |
 | --- | --- | --- |
-| `mlx-community/whisper-large-v3-turbo` | Default recommendation | Best default balance of speed and accuracy on Apple Silicon. |
-| `faster-whisper large-v3-turbo` | Compatibility fallback | Used when MLX is unavailable. Usually slower, but broader compatibility. |
-| Ollama audio/Whisper-like models | Experimental | Shown only when local Ollama reports audio capability or model names that look like ASR/Whisper. |
+| `mlx-community/Qwen3-ASR-1.7B-8bit` | Default transcription choice | End-to-end ASR with low latency and modest memory use. Best first choice for ordinary dictation. |
+| `mlx-community/whisper-large-v3-turbo` | Alternative transcription choice | Mature multilingual ASR. Use it when Qwen3-ASR quality is weaker for a particular microphone, accent, or vocabulary. |
 
 Correction models:
 
 | Model | Recommendation | Notes |
 | --- | --- | --- |
-| `qwen3.6:35b-a3b` | Default recommendation | Strong local default for multilingual dictation correction, IT term preservation, and conservative edits. Requires more memory and works best kept loaded. |
-| Mid-size Qwen / coder models | Optional | Useful when memory is tight. Faster, but usually less stable for Chinese dictation than the default 35B. |
-| `qwen2.5-coder:1.5b` | Speed testing only | Very fast, but may over-transform natural dictation into code-like or English output. Not recommended as the default. |
-| `Rule correction (no LLM)` | Fast fallback | No Ollama dependency. Use it when Ollama is unavailable or deterministic term replacement is enough. |
+| `mlx-community/Qwen3.6-35B-A3B-4bit` | Optional enhanced correction | High-quality multilingual correction and technical-term preservation. It uses much more memory than transcription-only mode. |
+| `Rule correction (no LLM)` | Deterministic option | Skips the large correction model while retaining `terms.json` replacements. |
 
 Guidance:
 
-- Quality first: keep the default `mlx-whisper large-v3-turbo` + `qwen3.6:35b-a3b`.
-- Lower latency: keep qwen loaded and let short utterances bypass Ollama.
-- Lower memory: switch to rule-only correction or choose a smaller Ollama text model.
+- Start with Qwen3-ASR for lower latency and memory.
+- Compare the same recordings with MLX Whisper when recognition quality needs another ASR baseline.
+- Enable Qwen3.6 correction only when terminology or sentence cleanup needs more help.
+- Model selection never silently falls back to another model. Missing models are shown as not installed and can be downloaded from the card.
 
 ## UI And Screenshot Guide
 
@@ -281,8 +262,9 @@ Use the main panel as the daily control surface:
 - Waveform area: gives a quick visual signal while recording or testing the input device.
 - Recording actions: `Start`, `Submit`, and `Cancel` match the first hotkey press, second hotkey press, and abort workflow.
 - Permissions and settings: language selection, microphone permission, Accessibility permission, native hotkey recording, reset/default controls, and the floating recording indicator are managed from this area.
-- Tabs: `Transcription Model`, `Correction Model`, and `Input Device` switch the compact card area without keeping stale height from another tab.
-- Bottom summary: shows the final active choices for state, transcription model, correction model, and input device.
+- Tabs: `Transcription Model`, `Correction Model`, and `Input Device`.
+- Transcription tab: contains both Qwen3-ASR and MLX Whisper choices.
+- Bottom summary: shows state, selected transcription model, optional correction state, and input device.
 
 ### Model Cards
 
@@ -290,11 +272,12 @@ Use the main panel as the daily control surface:
 
 Model cards are intentionally compact and equal-height within the current tab:
 
-- Each card shows the source, model name, parameter size, architecture, and vendor when those fields are available.
-- The selected card is highlighted; unavailable or placeholder cards explain whether the system is scanning, starting Ollama, missing qwen, or missing an input device.
+- Each model card shows its role: transcription or text correction, plus size, architecture, and vendor.
+- The selected card is highlighted; clicking the selected correction model again disables correction.
+- A missing snapshot is shown as not installed. Clicking it downloads the model and shows the system progress bar.
+- An installed but unloaded model loads into memory with the system progress bar before use.
 - Long model names wrap inside the fixed card width. The horizontal card list can still be dragged or scrolled.
-- Loaded Ollama models show a circular `X` in the top-right corner. Clicking it unloads that model from memory only; it does not delete model files from disk.
-- When the configured qwen model is installed but not loaded, Codex Voice may show the model card while it prepares the model with Ollama `keep_alive` and the configured context size.
+- Loaded MLX models show a circular `X` in the top-right corner. Clicking it unloads that model from memory without deleting its snapshot.
 
 ### Native Hotkey
 
@@ -315,8 +298,8 @@ The settings overlay records the global hotkey used to start and submit dictatio
 The quit flow is explicit about work that may continue outside the Agent:
 
 - If a recording worker is active, Codex Voice prompts before cancelling it and quitting.
-- If Ollama still has loaded models, the dialog lists their names and offers `Unload And Quit`, `Quit Only`, or `Cancel`.
-- `Unload And Quit` sends Ollama `keep_alive: 0` for the loaded models, then exits. It only unloads memory; it never deletes installed models.
+- If the model service has loaded models, the dialog lists their names and offers `Unload And Quit`, `Quit Only`, or `Cancel`.
+- `Quit Only` leaves the independent model service resident. `Unload And Quit` stops it and releases all model memory without deleting model files.
 - Unload failures are reported but do not leave the Agent stuck forever; the quit path has a bounded timeout.
 
 ## Common Operations
@@ -352,10 +335,11 @@ Main config:
 Important language fields:
 
 ```json
-"ui_language": "system"
+"ui_language": "system",
+"processing_route": "direct_asr"
 ```
 
-`ui_language` may be `system`, `en`, `zh-Hans`, `zh-Hant`, or `ja`. It drives UI text, CLI user output, Whisper language, Ollama correction prompts, and final output script. Legacy fields such as `output_language` and `force_simplified_chinese` may still be read for compatibility, but new configuration should use `ui_language`.
+`processing_route` is `direct_asr` or `two_stage` and is maintained by the selected transcription model. `ui_language` drives UI text, CLI output, ASR language, optional Qwen3.6 correction prompts, and final output script.
 
 Terms and deterministic replacements:
 
@@ -369,7 +353,7 @@ Correction prompt:
 ~/CodexVoice/config/correction_prompt.txt
 ```
 
-Deterministic replacements run before Ollama correction. Good candidates for `terms.json` include project names, library names, commands, file names, acronyms, and stable misrecognitions.
+Deterministic replacements run after ASR and before optional Qwen3.6 correction.
 
 ## Troubleshooting
 
@@ -389,15 +373,13 @@ bash ~/CodexVoice/bin/install-launch-agents.sh
 launchctl print gui/$(id -u)/com.codexvoice.agent
 ```
 
-Ollama models do not show:
+Local models do not show or load:
 
 ```bash
-which ollama
-ollama list
-conda run -n codex-voice python ~/CodexVoice/bin/codex-voice-config.py --list-ollama-models
+codex-voice-config --list-models
+launchctl print gui/$(id -u)/com.codexvoice.model-service
+tail -n 120 ~/CodexVoice/logs/com.codexvoice.model-service.err.log
 ```
-
-If you use a non-default port, set `OLLAMA_HOST` and restart the Agent.
 
 Auto-paste does not happen:
 
@@ -414,16 +396,18 @@ No microphone input:
 
 ## Stop Or Uninstall
 
-Stop the Agent:
+Stop the Agent and persistent model service:
 
 ```bash
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.codexvoice.agent.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.codexvoice.model-service.plist
 ```
 
-Remove the LaunchAgent:
+Remove both LaunchAgents:
 
 ```bash
 rm -f ~/Library/LaunchAgents/com.codexvoice.agent.plist
+rm -f ~/Library/LaunchAgents/com.codexvoice.model-service.plist
 ```
 
 Remove the runtime directory:

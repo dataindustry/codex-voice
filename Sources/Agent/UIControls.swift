@@ -331,12 +331,13 @@ final class CardChoiceView: NSControl {
     private let titleLabel = NSTextField(labelWithString: "")
     private let contentStack = NSStackView()
     private let unloadButton = CardCloseButton()
-    private let loadingOverlay = NSView()
+    private let loadingOverlay = NSVisualEffectView()
     private let loadingLabel = NSTextField(labelWithString: "")
     private let loadingDetailLabel = NSTextField(labelWithString: " ")
     private let loadingProgress = NSProgressIndicator()
     private var uniformHeightConstraint: NSLayoutConstraint?
     private(set) var isSelectedCard = false
+    private(set) var modelID: String?
 
     init(
         source: String,
@@ -471,9 +472,8 @@ final class CardChoiceView: NSControl {
         loadingLabel.stringValue = task.label.isEmpty
             ? CodexVoiceI18n.text("menu.modelPreparing", config: config)
             : task.label
-        loadingDetailLabel.stringValue = task.detail.isEmpty
-            ? CodexVoiceI18n.text("task.loading_ollama_memory", config: config)
-            : task.detail
+        loadingDetailLabel.isHidden = task.detail.isEmpty
+        loadingDetailLabel.stringValue = task.detail
 
         if let progress = task.progress {
             loadingProgress.stopAnimation(nil)
@@ -492,6 +492,10 @@ final class CardChoiceView: NSControl {
         unloadButton.target = target
         unloadButton.action = action
         unloadButton.isHidden = false
+    }
+
+    func setModelID(_ modelID: String) {
+        self.modelID = modelID
     }
 
     private func setCardStyle(selected: Bool, enabled: Bool) {
@@ -525,10 +529,13 @@ final class CardChoiceView: NSControl {
 
     private func configureLoadingOverlay() {
         loadingOverlay.translatesAutoresizingMaskIntoConstraints = false
+        loadingOverlay.material = .hudWindow
+        loadingOverlay.blendingMode = .withinWindow
+        loadingOverlay.state = .active
         loadingOverlay.wantsLayer = true
         loadingOverlay.layer?.backgroundColor = NSColor(
-            calibratedWhite: 0.12,
-            alpha: 0.82
+            calibratedWhite: 0.08,
+            alpha: 0.28
         ).usingColorSpace(.deviceRGB)?.cgColor
         loadingOverlay.layer?.cornerRadius = 8
         loadingOverlay.isHidden = true
@@ -548,6 +555,7 @@ final class CardChoiceView: NSControl {
         loadingDetailLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
         loadingDetailLabel.lineBreakMode = .byTruncatingMiddle
 
+        loadingProgress.translatesAutoresizingMaskIntoConstraints = false
         loadingProgress.style = .bar
         loadingProgress.controlSize = .small
         loadingProgress.widthAnchor.constraint(equalToConstant: 160).isActive = true

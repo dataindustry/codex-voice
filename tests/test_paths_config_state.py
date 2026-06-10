@@ -29,16 +29,28 @@ def test_app_paths_are_root_relative(tmp_path: Path) -> None:
     assert paths.config_path == tmp_path.resolve() / "config" / "config.json"
 
 
-def test_v1_config_migrates_to_privacy_preserving_v2() -> None:
+def test_long_roots_use_a_short_model_service_socket(tmp_path: Path) -> None:
+    long_root = tmp_path / ("nested-" * 20)
+    paths = paths_for_root(long_root)
+
+    assert len(os.fsencode(paths.model_service_socket_path)) < 96
+
+
+def test_existing_v1_config_migrates_to_two_stage_v4() -> None:
     migrated = migrate_config({"save_recordings": True})
 
-    assert migrated["config_version"] == 2
+    assert migrated["config_version"] == 4
     assert migrated["save_recordings"] is False
     assert migrated["save_transcripts"] is True
+    assert migrated["processing_route"] == "two_stage"
+    assert migrated["correction_enabled"] is True
 
 
-def test_default_config_is_v2_and_does_not_save_recordings() -> None:
-    assert DEFAULT_CONFIG["config_version"] == 2
+def test_new_default_config_uses_direct_asr() -> None:
+    assert DEFAULT_CONFIG["config_version"] == 4
+    assert DEFAULT_CONFIG["processing_route"] == "direct_asr"
+    assert DEFAULT_CONFIG["direct_asr_model"] == "qwen3-asr-1.7b-8bit"
+    assert DEFAULT_CONFIG["correction_enabled"] is False
     assert DEFAULT_CONFIG["save_recordings"] is False
     assert DEFAULT_CONFIG["save_transcripts"] is True
 

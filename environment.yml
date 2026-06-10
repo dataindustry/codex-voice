@@ -7,10 +7,11 @@ dependencies:
   - ffmpeg
   - portaudio
   - numpy>=1.26
-  - requests>=2.32
   - pip:
       - mlx-whisper>=0.4.2
-      - faster-whisper>=1.1.1
+      - mlx-qwen3-asr>=0.3.3
+      - mlx-lm>=0.31.3
+      - modelscope>=1.37.1
       - sounddevice>=0.5.1
       - pyperclip>=1.9
       - opencc-python-reimplemented>=0.1.7

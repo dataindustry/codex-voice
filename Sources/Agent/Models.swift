@@ -22,21 +22,25 @@ struct InputDevice {
     let index: Int?
 }
 
-struct OllamaModel {
+struct LocalModel {
+    let id: String
     let name: String
-    let capabilities: [String]
-    let needsTest: Bool
+    let role: String
+    let modelType: String
+    let installed: Bool
     let loaded: Bool
     let size: Int64?
-    let family: String
-    let families: [String]
     let parameterSize: String
+    let architecture: String
+    let vendor: String
     let quantization: String
 }
 
 struct ModelTask {
     let status: String
     let scope: String
+    let modelID: String
+    let phase: String
     let labelKey: String
     let labelArgs: [String: String]
     let label: String
@@ -47,22 +51,20 @@ struct ModelTask {
     let updatedAt: String
 }
 
-struct OllamaScan {
+struct LocalModelScan {
     let available: Bool
     let status: String
     let error: String
-    let baseURL: String
-    let configuredCorrectionModel: String
-    let configuredCorrectionModelInstalled: Bool
-    let configuredCorrectionModelLoaded: Bool
-    let transcriptionModels: [OllamaModel]
-    let correctionModels: [OllamaModel]
+    let socketPath: String
+    let directASRModels: [LocalModel]
+    let transcriptionModels: [LocalModel]
+    let correctionModels: [LocalModel]
 }
 
 struct PanelMaintenance {
     let pythonPath: String
     let launchAgentStatus: String
-    let ollamaStatus: String
-    let ollamaStatusCode: String
-    let ollamaBaseURL: String
+    let modelServiceStatus: String
+    let modelServiceStatusCode: String
+    let modelServiceSocket: String
 }
