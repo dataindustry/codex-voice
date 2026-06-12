@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
+from codex_voice import model_client
 from codex_voice.model_client import ModelServiceError, request_model_service
 from codex_voice.model_service import ModelRuntime, ModelServer
 from codex_voice.paths import paths_for_root
@@ -57,3 +59,26 @@ def test_model_service_returns_explicit_missing_model_error(tmp_path: Path) -> N
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_start_model_service_bootstraps_unregistered_launch_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = paths_for_root(tmp_path)
+    plist = tmp_path / "Library" / "LaunchAgents" / "com.codexvoice.model-service.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("plist", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        commands.append(command)
+        return CompletedProcess(command, 1 if len(commands) == 1 else 0, "", "not found")
+
+    monkeypatch.setattr(model_client.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(model_client.subprocess, "run", fake_run)
+    monkeypatch.setattr(model_client, "_send", lambda *_args, **_kwargs: {"ok": True})
+
+    model_client.start_model_service(paths, timeout=0.1)
+
+    assert [command[1] for command in commands] == ["kickstart", "bootstrap", "kickstart"]

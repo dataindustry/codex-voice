@@ -45,12 +45,33 @@ def _send(socket_path: Path, payload: dict[str, Any], timeout: float) -> dict[st
 def start_model_service(paths: AppPaths, timeout: float = 15) -> None:
     label = "com.codexvoice.model-service"
     domain = f"gui/{os.getuid()}"
-    subprocess.run(
+    service = f"{domain}/{label}"
+    kickstart = subprocess.run(
         ["/bin/launchctl", "kickstart", "-k", f"{domain}/{label}"],
         capture_output=True,
         text=True,
         check=False,
     )
+    if kickstart.returncode != 0:
+        plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+        if not plist.is_file():
+            detail = (kickstart.stderr or kickstart.stdout).strip()
+            raise ModelServiceError(
+                f"Model service is not installed: {plist}"
+                + (f" ({detail})" if detail else "")
+            )
+        subprocess.run(
+            ["/bin/launchctl", "bootstrap", domain, str(plist)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        subprocess.run(
+            ["/bin/launchctl", "kickstart", "-k", service],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     deadline = time.monotonic() + timeout
     last_error = ""
     while time.monotonic() < deadline:
